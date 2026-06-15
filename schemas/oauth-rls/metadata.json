@@ -1,0 +1,20 @@
+{
+  "name": "OAuth Per-Client RLS Scoping",
+  "description": "Adds per-client row-level security to the thoughts table for an OAuth 2.1 resource server. Scopes all reads and writes by the JWT client_id claim, grants the authenticated role the necessary table and function privileges, and redefines upsert_thought / match_thoughts as SECURITY INVOKER so per-request Supabase clients only ever see their own client's memory.",
+  "category": "schemas",
+  "author": {
+    "name": "David A. Ventimiglia",
+    "github": "david-a-ventimiglia"
+  },
+  "version": "1.0.0",
+  "requires": {
+    "open_brain": true,
+    "services": ["Supabase"],
+    "tools": ["SQL Editor", "Supabase CLI"]
+  },
+  "tags": ["oauth", "rls", "security", "multi-client", "resource-server", "authentication"],
+  "difficulty": "advanced",
+  "estimated_time": "20 minutes",
+  "created": "2026-06-15",
+  "updated": "2026-06-15"
+}
