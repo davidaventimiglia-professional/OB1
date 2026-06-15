@@ -207,6 +207,24 @@ Deno.test("validate rejects a token with the wrong client_id", async () => {
   await assertRejects(() => validate(`Bearer ${token}`), AuthError);
 });
 
+Deno.test("validate rejects a token missing client_id", async () => {
+  const { privateKey, keySet } = await makeKeySet();
+  const validate = createTokenValidator({
+    issuer: ISSUER,
+    expectedClientId: CLIENT_ID,
+    getKeySet: () => Promise.resolve(keySet),
+  });
+  // Build the payload WITHOUT a client_id claim at all (not set to undefined).
+  const token = await new SignJWT({ role: "authenticated" })
+    .setProtectedHeader({ alg: "RS256", kid: "test-kid" })
+    .setIssuer(ISSUER)
+    .setAudience("authenticated")
+    .setIssuedAt()
+    .setExpirationTime("5m")
+    .sign(privateKey);
+  await assertRejects(() => validate(`Bearer ${token}`), AuthError);
+});
+
 Deno.test("validate rejects a token with a bad signature", async () => {
   const { keySet } = await makeKeySet();
   // Sign with a different private key but the same advertised kid.

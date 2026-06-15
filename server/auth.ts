@@ -195,6 +195,7 @@ export function createTokenValidator(
       const resolver = await keySet();
       const result = await jwtVerify(token, resolver, {
         issuer: cfg.issuer,
+        algorithms: ["RS256", "ES256"], // Supabase asymmetric signing keys; never accept alg:none/HMAC
       });
       payload = result.payload as Claims;
     } catch (err) {
