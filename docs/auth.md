@@ -38,7 +38,6 @@ secrets with `supabase secrets set NAME=value`):
 | --- | --- | --- |
 | `OAUTH_ISSUER` | The Supabase Auth issuer URL (the AS). | `https://<ref>.supabase.co/auth/v1` |
 | `OAUTH_CLIENT_ID` | The single registered OAuth client id this RS accepts. Tokens whose `client_id` claim differs are rejected. | `<client-id-from-dashboard>` |
-| `OAUTH_CLIENT_SECRET` | The registered OAuth client secret (used in the authorization-code exchange by the connector flow). | `<client-secret-from-dashboard>` |
 | `OAUTH_RESOURCE` | The canonical resource identifier — exactly this function's URL. Used in discovery metadata and the `WWW-Authenticate` challenge. | `https://<ref>.supabase.co/functions/v1/open-brain-mcp` |
 | `SUPABASE_ANON_KEY` | Combined with the caller's JWT to build the per-request, RLS-scoped Supabase client. | `<anon-key>` |
 
@@ -51,6 +50,13 @@ secrets with `supabase secrets set NAME=value`):
 >   **rotate** it if it was ever exposed (see [Manual prerequisites](#manual-prerequisites)).
 
 `SUPABASE_URL` is automatically available inside Edge Functions.
+
+> **`OAUTH_CLIENT_SECRET` is not read by this function.** The resource server
+> only verifies access tokens; the authorization-code exchange that uses the
+> client secret is performed by the connector / authorization server, not the
+> RS. The secret is captured at client registration — see
+> [Manual prerequisites](#manual-prerequisites) — and used by the OAuth /
+> connector flow, so it does **not** need to be set as a function secret.
 
 ## `verify_jwt = false` requirement
 
@@ -170,8 +176,11 @@ they are not done in code:
    **dynamic client registration OFF**.
 2. **Build and host a consent page** at your Site URL + `/oauth/consent`. This
    page is **external** — it is not part of this repo.
-3. **Register the OAuth client** and capture its `client_id` and `client_secret`
-   → set `OAUTH_CLIENT_ID` / `OAUTH_CLIENT_SECRET`.
+3. **Register the OAuth client** and capture its `client_id` and `client_secret`.
+   Set `OAUTH_CLIENT_ID` as a function secret. The **`client_secret`** is **not**
+   read by this function — it is used by the connector / authorization-server
+   authorization-code exchange, so provide it to that flow (e.g. the connector
+   registration) rather than as a function secret.
 4. **Obtain Claude's exact redirect URI** from the connector dialog on
    claude.ai and register it **verbatim**. Redirect URIs are matched by exact
    string; a trailing slash or case difference will fail.

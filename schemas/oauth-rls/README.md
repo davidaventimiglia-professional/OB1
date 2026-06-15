@@ -35,6 +35,18 @@ This migration:
    now runs as the calling client and is therefore RLS-filtered to that client's
    `client_id`.
 
+> **Warning — `enhanced-thoughts` users, do not apply verbatim.** This
+> migration's `CREATE OR REPLACE FUNCTION upsert_thought` uses the **base**
+> function body. If you installed the `enhanced-thoughts` schema (which ships a
+> richer `upsert_thought` that writes extra columns such as `type`,
+> `importance`, and `quality_score`), applying this migration as-is will
+> **overwrite** that richer function with the base body and silently drop those
+> extra writes. Instead, merge the changes this migration makes to
+> `upsert_thought` — `client_id` stamping from `auth.jwt() ->> 'client_id'`,
+> `SECURITY INVOKER`, and the per-client `ON CONFLICT (client_id,
+> content_fingerprint)` target — into your own enhanced `upsert_thought`
+> definition rather than running this one.
+
 ## How to apply
 
 With the Supabase CLI (recommended):
