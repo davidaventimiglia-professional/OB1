@@ -27,6 +27,18 @@ export class AuthError extends Error {
   }
 }
 
+/**
+ * Error thrown for an authorization-server-side failure (the AS's fault, not
+ * the client's): AS metadata unreachable/non-200, malformed metadata, or an
+ * issuer mismatch. These must surface as 503, not 401.
+ */
+export class UpstreamError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "UpstreamError";
+  }
+}
+
 // --- Task B: RFC 9728 Protected Resource Metadata ---------------------------
 
 export interface ProtectedResourceMetadataInput {
@@ -110,19 +122,19 @@ export async function resolveJwksUri(
   const doFetch = cfg.fetchImpl ?? fetch;
   const res = await doFetch(cfg.metadataUrl);
   if (!res.ok) {
-    throw new AuthError(
+    throw new UpstreamError(
       `Failed to fetch AS metadata: ${res.status} ${res.statusText}`,
     );
   }
   const meta = (await res.json()) as AuthorizationServerMetadata;
 
   if (meta.issuer !== undefined && meta.issuer !== cfg.issuer) {
-    throw new AuthError(
+    throw new UpstreamError(
       `AS metadata issuer mismatch: expected ${cfg.issuer}, got ${meta.issuer}`,
     );
   }
   if (!meta.jwks_uri) {
-    throw new AuthError("AS metadata is missing jwks_uri");
+    throw new UpstreamError("AS metadata is missing jwks_uri");
   }
 
   jwksUriCache.set(cfg.metadataUrl, meta.jwks_uri);

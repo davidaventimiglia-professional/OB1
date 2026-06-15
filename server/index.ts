@@ -563,7 +563,9 @@ app.all("*", async (c) => {
         headers: { ...corsHeaders, "content-type": "application/json", "WWW-Authenticate": wwwAuthenticateChallenge(OAUTH_RESOURCE) },
       });
     }
-    // Authorization server / JWKS unreachable — not the client's fault.
+    // Authorization server / JWKS unreachable, or any other non-AuthError
+    // (UpstreamError from resolveJwksUri, network errors) — not the client's
+    // fault, so report 503 rather than 401.
     return new Response(JSON.stringify({ error: "auth_unavailable" }), {
       status: 503,
       headers: { ...corsHeaders, "content-type": "application/json", "Retry-After": "30" },

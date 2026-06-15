@@ -6,6 +6,7 @@ import {
   createTokenValidator,
   protectedResourceMetadataUrl,
   resolveJwksUri,
+  UpstreamError,
   wwwAuthenticateChallenge,
 } from "./auth.ts";
 
@@ -82,12 +83,14 @@ Deno.test("resolveJwksUri throws on issuer mismatch", async () => {
         { status: 200, headers: { "content-type": "application/json" } },
       ),
     )) as typeof fetch;
-  await assertRejects(() =>
-    resolveJwksUri({
-      issuer: ISSUER,
-      metadataUrl: `${METADATA_URL}?mismatch=${crypto.randomUUID()}`,
-      fetchImpl,
-    })
+  await assertRejects(
+    () =>
+      resolveJwksUri({
+        issuer: ISSUER,
+        metadataUrl: `${METADATA_URL}?mismatch=${crypto.randomUUID()}`,
+        fetchImpl,
+      }),
+    UpstreamError,
   );
 });
 
@@ -99,12 +102,14 @@ Deno.test("resolveJwksUri throws when jwks_uri missing", async () => {
         headers: { "content-type": "application/json" },
       }),
     )) as typeof fetch;
-  await assertRejects(() =>
-    resolveJwksUri({
-      issuer: ISSUER,
-      metadataUrl: `${METADATA_URL}?nojwks=${crypto.randomUUID()}`,
-      fetchImpl,
-    })
+  await assertRejects(
+    () =>
+      resolveJwksUri({
+        issuer: ISSUER,
+        metadataUrl: `${METADATA_URL}?nojwks=${crypto.randomUUID()}`,
+        fetchImpl,
+      }),
+    UpstreamError,
   );
 });
 
