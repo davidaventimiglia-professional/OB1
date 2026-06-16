@@ -38,15 +38,15 @@ consent page needs **no owner allow-list**; tenancy isolation is the protection.
 
 ## Decisions (locked)
 
-| Decision | Choice |
-|----------|--------|
-| Hosting | Supabase Edge Function at `/functions/v1/oauth-consent`, `verify_jwt = false` |
-| Login method | Social OAuth, **GitHub only** |
-| Who may consent | Any authenticated user (no allow-list); tenancy isolates brains |
-| Session/PKCE handling | `@supabase/ssr` `createServerClient` + cookie adapters, `flowType: 'pkce'` |
-| Web framework | Hono (consistent with the MCP server) |
-| CSRF | Double-submit cookie (random token in cookie + form field) — no server secret |
-| Repo placement | `integrations/oauth-consent/` + `README.md` + `metadata.json`; symlinked to `supabase/functions/oauth-consent` |
+| Decision              | Choice                                                                                                         |
+|-----------------------|----------------------------------------------------------------------------------------------------------------|
+| Hosting               | Supabase Edge Function at `/functions/v1/oauth-consent`, `verify_jwt = false`                                  |
+| Login method          | Social OAuth, **GitHub only**                                                                                  |
+| Who may consent       | Any authenticated user (no allow-list); tenancy isolates brains                                                |
+| Session/PKCE handling | `@supabase/ssr` `createServerClient` + cookie adapters, `flowType: 'pkce'`                                     |
+| Web framework         | Hono (consistent with the MCP server)                                                                          |
+| CSRF                  | Double-submit cookie (random token in cookie + form field) — no server secret                                  |
+| Repo placement        | top-level `oauth-consent/` (parallel to `server/`) + `README.md` + `metadata.json`; symlinked to `supabase/functions/oauth-consent` |
 
 ## Architecture
 
@@ -97,7 +97,7 @@ Form body: `authorization_id`, `decision` (`approve` | `deny`), CSRF token.
 
 ## Components / files
 
-Under `integrations/oauth-consent/`:
+Under top-level `oauth-consent/` (parallel to `server/`):
 
 - `index.ts` — Hono app: the two routes, the `@supabase/ssr` server-client factory,
   and the cookie get/set adapters bridging Hono's cookie helpers.
@@ -111,7 +111,7 @@ Under `integrations/oauth-consent/`:
 - `README.md` + `metadata.json` — per repo contribution conventions.
 
 Deploy seam: `supabase/functions/oauth-consent` → symlink to
-`../../integrations/oauth-consent` (mirrors the `open-brain-mcp` → `server` symlink).
+`../../oauth-consent` (mirrors the `open-brain-mcp` → `server` symlink).
 Function config sets `verify_jwt = false`.
 
 ## Environment / secrets
@@ -127,14 +127,14 @@ secret is required.
 
 ## Error handling
 
-| Condition | Response |
-|-----------|----------|
-| Missing `authorization_id` | `400` with a short explanation |
+| Condition                                            | Response                                                             |
+|------------------------------------------------------|----------------------------------------------------------------------|
+| Missing `authorization_id`                           | `400` with a short explanation                                       |
 | `getAuthorizationDetails` fails (invalid/expired id) | Friendly "this authorization request has expired or is invalid" page |
-| `exchangeCodeForSession` fails | Error page with a retry link |
-| `approve`/`deny` upstream failure | `502` error page |
-| Unauthenticated POST to `/decision` | Redirect to GET entry to re-authenticate |
-| CSRF token mismatch | `403` |
+| `exchangeCodeForSession` fails                       | Error page with a retry link                                         |
+| `approve`/`deny` upstream failure                    | `502` error page                                                     |
+| Unauthenticated POST to `/decision`                  | Redirect to GET entry to re-authenticate                             |
+| CSRF token mismatch                                  | `403`                                                                |
 
 ## Testing
 
@@ -156,23 +156,24 @@ secret is required.
 
 These join the existing resource-server prerequisites in `docs/auth.md`.
 
-## Open questions / to verify during implementation
+## Resolutions & verification items
 
-1. **`supabase-js` version with `auth.oauth.*`.** The `2.47.10` pinned in `server/`
-   predates the OAuth-server consent methods. Pin a version in the consent function's
-   `deno.json` that exposes `auth.oauth.getAuthorizationDetails` /
-   `approveAuthorization` / `denyAuthorization`; if no suitable version works under
-   `@supabase/ssr`, fall back to raw REST calls to the consent endpoints with the user
-   bearer token.
-2. **`@supabase/ssr` under Deno edge runtime.** It is framework-agnostic (cookie
-   `getAll`/`setAll` adapters), expected to work, but confirm it imports and runs in
-   the Deno edge runtime.
-3. **`auth.uid()` resolves from OAuth-server tokens.** Confirm issued access tokens
-   carry `sub` = the user id so RLS scoping works (verify against a real token in the
-   end-to-end test).
-4. **Multi-segment `authorization_url_path`.** Confirm Supabase accepts
-   `/functions/v1/oauth-consent` as the Authorization Path (undocumented but
-   structurally expected to be simple concatenation with Site URL).
+1. **`supabase-js` version with `auth.oauth.*` — decided.** The `2.47.10` pinned in
+   `server/` predates the OAuth-server consent methods. **Pin a later `@supabase/supabase-js`
+   in the consent function's `deno.json`** that exposes
+   `auth.oauth.getAuthorizationDetails` / `approveAuthorization` / `denyAuthorization`.
+   The implementation plan must identify the specific minimum version and confirm it
+   resolves cleanly under `@supabase/ssr`. (REST-call fallback is no longer the plan;
+   pin the version that has the methods.)
+2. **`@supabase/ssr` under Deno edge runtime — expected to work.** Framework-agnostic
+   (cookie `getAll`/`setAll` adapters). Confirm it imports and runs during
+   implementation; no design change anticipated.
+3. **`auth.uid()` resolves from OAuth-server tokens — expected to work.** Issued access
+   tokens should carry `sub` = the user id. Confirm against a real token in the
+   end-to-end test; no design change anticipated.
+4. **Multi-segment `authorization_url_path` — expected to work.** Supabase should accept
+   `/functions/v1/oauth-consent` (simple concatenation with Site URL). Confirm when
+   setting the Authorization Path; no design change anticipated.
 
 ## Out of scope
 
