@@ -11,6 +11,15 @@ function entryUrl(origin: string, authorizationId: string): string {
   return `${origin}${PUBLIC_PATH}?authorization_id=${encodeURIComponent(authorizationId)}`;
 }
 
+/** Redirect only to a parseable absolute URL from the auth server; reject garbage. */
+function redirectToAuthServerUrl(c: Context, rawUrl: string) {
+  try {
+    return c.redirect(new URL(rawUrl).toString(), 302);
+  } catch {
+    return c.html(errorPage("The authorization server returned an invalid redirect."), 502);
+  }
+}
+
 function makeClient(c: Context) {
   return createServerClient(
     Deno.env.get("SUPABASE_URL")!,
@@ -66,14 +75,14 @@ async function handleEntry(c: Context) {
     return c.html(errorPage("This authorization request has expired or is invalid."), 400);
   }
   if (!("authorization_id" in details)) {
-    return c.redirect(details.redirect_url, 302); // already consented
+    return redirectToAuthServerUrl(c, details.redirect_url); // already consented
   }
 
   const csrf = generateCsrfToken();
   setCookie(c, "csrf", csrf, { path: PUBLIC_PATH, httpOnly: true, secure: true, sameSite: "Lax" });
   const scopes = (details.scope ?? "").split(/\s+/).filter(Boolean);
   return c.html(consentPage({
-    clientName: details.client.name,
+    clientName: details.client?.name ?? "the application",
     scopes,
     authorizationId,
     csrfToken: csrf,
@@ -104,7 +113,7 @@ async function handleDecision(c: Context) {
   if (result.error || !result.data?.redirect_url) {
     return c.html(errorPage("Could not record your decision."), 502);
   }
-  return c.redirect(result.data.redirect_url, 302);
+  return redirectToAuthServerUrl(c, result.data.redirect_url);
 }
 
 // Deployed functions see the full public path; bare paths cover `supabase functions serve`.
