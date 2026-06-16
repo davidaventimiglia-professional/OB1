@@ -67,6 +67,8 @@ async function handleEntry(c: Context) {
       options: { redirectTo: entryUrl(url.origin, authorizationId), skipBrowserRedirect: true },
     });
     if (error || !data?.url) return c.html(errorPage("Could not start sign-in."), 502);
+    // Client name is unknown pre-auth: getAuthorizationDetails requires a session,
+    // which we don't have until after the GitHub round-trip. Use a generic label.
     return c.html(signInPage(data.url, "this application"));
   }
 

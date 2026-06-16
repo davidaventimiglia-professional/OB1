@@ -19,7 +19,12 @@ export function parseDecision(raw: string | null | undefined): Decision | null {
 
 export type EntryAction = "exchange-code" | "show-consent" | "begin-signin";
 
-/** First action for the GET entry route, by precedence. */
+/**
+ * First action for the GET entry route, by precedence. Exposed as a pure,
+ * independently-tested helper; handleEntry in index.ts mirrors this precedence
+ * inline (it needs the surrounding async I/O), so the unit tests here are the
+ * authoritative coverage of the branch logic.
+ */
 export function chooseEntryAction(opts: { hasCode: boolean; authenticated: boolean }): EntryAction {
   if (opts.hasCode) return "exchange-code";
   if (opts.authenticated) return "show-consent";
