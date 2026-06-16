@@ -1,0 +1,20 @@
+{
+  "name": "OAuth Consent Edge Function",
+  "description": "Authorization-server-side consent page for Open Brain's OAuth 2.1 setup. Signs the user in with GitHub via PKCE (@supabase/ssr), then drives the Supabase OAuth-server consent API (getAuthorizationDetails / approveAuthorization / denyAuthorization) to record approve/deny. Per-user RLS isolates each tenant.",
+  "category": "integrations",
+  "author": {
+    "name": "David A. Ventimiglia",
+    "github": "david-a-ventimiglia"
+  },
+  "version": "1.0.0",
+  "requires": {
+    "open_brain": true,
+    "services": ["Supabase"],
+    "tools": ["Supabase CLI", "Deno"]
+  },
+  "tags": ["oauth", "consent", "authentication", "edge-function", "github", "pkce"],
+  "difficulty": "advanced",
+  "estimated_time": "30 minutes",
+  "created": "2026-06-16",
+  "updated": "2026-06-16"
+}
