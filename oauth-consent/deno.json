@@ -1,0 +1,7 @@
+{
+  "imports": {
+    "hono": "npm:hono@4.9.2",
+    "@supabase/supabase-js": "npm:@supabase/supabase-js@2.108.2",
+    "@supabase/ssr": "npm:@supabase/ssr@0.12.0"
+  }
+}
