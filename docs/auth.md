@@ -116,15 +116,17 @@ Because the `aud` is generic, this RS cannot bind a token to itself by checking
 
 1. Verifying signature + issuer (`OAUTH_ISSUER`) + expiry against the AS JWKS.
 2. Checking the token's **`client_id` claim equals `OAUTH_CLIENT_ID`** (the
-   single registered client).
-3. Enforcing **RLS keyed on `(auth.jwt() ->> 'client_id')`** on the data layer.
+   single registered client) — this is the **audience** check.
+3. Enforcing **RLS keyed on `user_id = auth.uid()`** (the JWT `sub`) on the data
+   layer — this is the **tenancy** boundary.
 
 ### Residual confused-deputy risk
 
 Because `aud` is generic, any Supabase access token minted for this project's
 `authenticated` role and carrying the matching `client_id` would pass the
-audience check. The `client_id` binding plus per-client RLS mitigates this, but
-the token is not cryptographically scoped to this exact resource URI.
+audience check. The `client_id` binding plus per-user RLS mitigates this, but
+the token is not cryptographically scoped to this exact resource URI. (Note that
+even so, RLS still confines any such token to its own user's rows.)
 
 **Optional hardening — Custom Access Token Hook.** Configure a Supabase
 [Custom Access Token Hook](https://supabase.com/docs/guides/auth/auth-hooks)
@@ -134,18 +136,21 @@ This is optional and not required for the base flow.
 
 ## Row-Level Security (RLS)
 
-Data is scoped **per `client_id`**. See `schemas/oauth-rls/` for the migration:
+Data is scoped **per user (tenant)**. A user's brain follows the human across any
+OAuth client; `client_id` is kept only as provenance. See `schemas/oauth-rls/`
+for the migration:
 
-- Adds a `client_id` column (indexed) to `thoughts`.
+- Adds a `user_id uuid` tenant column (indexed, defaulting to `auth.uid()`, FK to
+  `auth.users`) to `thoughts`, and keeps `client_id` as non-scoping provenance.
 - Four RLS policies for the `authenticated` role (SELECT/INSERT/UPDATE/DELETE),
-  each keyed on `client_id = (auth.jwt() ->> 'client_id')`.
+  each keyed on `user_id = auth.uid()`.
 - `upsert_thought` and `match_thoughts` redefined as `SECURITY INVOKER` so they
-  run as the calling client and stamp/filter by `client_id`.
+  run as the calling user and stamp/filter by `user_id`.
 
-> **Legacy rows.** Rows created before the migration have `client_id IS NULL`.
-> The authenticated-role policies require `client_id = (auth.jwt() ->> 'client_id')`,
-> so those legacy rows are **invisible to OAuth clients** until they are
-> backfilled with a real `client_id`. They remain accessible to the service role.
+> **Legacy rows.** Rows created before the migration have `user_id IS NULL`.
+> The authenticated-role policies require `user_id = auth.uid()`, so those legacy
+> rows are **invisible to OAuth clients** until they are backfilled with a real
+> user id. They remain accessible to the service role.
 
 ## Deploy seam
 
