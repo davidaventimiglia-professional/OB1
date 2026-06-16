@@ -178,21 +178,34 @@ These are hosted / Supabase-dashboard actions performed **outside** this repo �
 they are not done in code:
 
 1. **Enable Authentication → OAuth Server** in the Supabase dashboard, with
-   **dynamic client registration OFF**.
-2. **Build and host a consent page** at your Site URL + `/oauth/consent`. This
-   page is **external** — it is not part of this repo.
-3. **Register the OAuth client** and capture its `client_id` and `client_secret`.
+   **dynamic client registration OFF**. Set **Site URL** to your project URL
+   (`https://<project-ref>.supabase.co`) and **Authorization Path** to
+   `/functions/v1/oauth-consent`.
+2. **Deploy the consent page.** It is now an Edge Function **in this repo** at
+   `oauth-consent/` (deployed as `oauth-consent` with `verify_jwt = false`); it is
+   no longer an external page. See `oauth-consent/README.md`. Combined with the
+   Authorization Path above, the consent URL resolves to
+   `<project-url>/functions/v1/oauth-consent`.
+3. **Enable the GitHub auth provider** (register a GitHub OAuth app and set its
+   client id/secret in the dashboard). The consent page signs the user in with
+   GitHub before showing the approve/deny screen.
+4. **Add `<project-url>/functions/v1/oauth-consent` to the redirect allow-list**
+   (`additional_redirect_urls`). This is the **user-login** return URL the consent
+   function passes to `signInWithOAuth` — distinct from Claude's OAuth-*client*
+   redirect URI in the next item.
+5. **Register the OAuth client** and capture its `client_id` and `client_secret`.
    Set `OAUTH_CLIENT_ID` as a function secret. The **`client_secret`** is **not**
    read by this function — it is used by the connector / authorization-server
    authorization-code exchange, so provide it to that flow (e.g. the connector
    registration) rather than as a function secret.
-4. **Obtain Claude's exact redirect URI** from the connector dialog on
+6. **Obtain Claude's exact redirect URI** from the connector dialog on
    claude.ai and register it **verbatim**. Redirect URIs are matched by exact
    string; a trailing slash or case difference will fail.
-5. **Set the env secrets** listed in
+7. **Set the env secrets** listed in
    [Environment variables](#environment-variables--supabase-secrets).
-6. **Rotate the old exposed `MCP_ACCESS_KEY`.** It is no longer used by the core
-   function and should be invalidated if it was ever exposed.
+8. **Rotate the old exposed `MCP_ACCESS_KEY`.** It is no longer used by the core
+   function and should be invalidated if it was ever exposed. *(Done — revoked via
+   `supabase secrets unset MCP_ACCESS_KEY`.)*
 
 ## How to verify
 
