@@ -1,0 +1,20 @@
+{
+  "name": "OAuth Consent App (Vercel)",
+  "description": "Authorization-server-side consent page for Open Brain's OAuth 2.1 setup, hosted on Vercel (Next.js App Router). Signs the user in with GitHub via PKCE (@supabase/ssr), then drives the Supabase OAuth-server consent API (getAuthorizationDetails / approveAuthorization / denyAuthorization) to record approve/deny. Per-user RLS isolates each tenant.",
+  "category": "integrations",
+  "author": {
+    "name": "David A. Ventimiglia",
+    "github": "david-a-ventimiglia"
+  },
+  "version": "1.0.0",
+  "requires": {
+    "open_brain": true,
+    "services": ["Supabase", "Vercel"],
+    "tools": ["Vercel CLI", "Node.js"]
+  },
+  "tags": ["oauth", "consent", "authentication", "nextjs", "vercel", "github", "pkce"],
+  "difficulty": "advanced",
+  "estimated_time": "45 minutes",
+  "created": "2026-06-16",
+  "updated": "2026-06-17"
+}

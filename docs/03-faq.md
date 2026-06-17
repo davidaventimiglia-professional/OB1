@@ -209,6 +209,22 @@ If you get a JSON list of models back, the key is valid. If you get a 401, the k
 
 ---
 
+## OAuth Setup and Authentication
+
+### "Do I still use `x-brain-key`?"
+
+No. The core `open-brain-mcp` server is now an OAuth 2.1 resource server — clients authenticate with an OAuth Bearer token issued by Supabase Auth, not a shared `x-brain-key` / `MCP_ACCESS_KEY`. See `oauth-setup.md` to set it up and `auth.md` for how it works.
+
+### "Why is the consent page hosted on Vercel instead of Supabase?"
+
+Supabase rewrites HTML served from Edge Functions on the default `*.supabase.co` domain to `text/plain` with a restrictive `sandbox` Content-Security-Policy (serving real HTML there requires a Pro custom domain), which breaks an interactive consent screen. Hosting the Next.js consent app on Vercel renders HTML normally. Supabase still does everything else (authorization server, GitHub identity provider, JWKS, RLS-scoped data).
+
+### "Connecting fails with `invalid_credentials` — what's wrong?"
+
+Almost always the OAuth client's `token_endpoint_auth_method` is `client_secret_basic` (Supabase's default for confidential clients) while Claude authenticates with `client_secret_post`. Set the client to `client_secret_post` (Authentication → OAuth Apps). See the troubleshooting section in `oauth-setup.md`.
+
+---
+
 ## Rate Limits and API Issues
 
 ### "My suite of agents keeps hitting per-minute rate limits"

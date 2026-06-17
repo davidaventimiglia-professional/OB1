@@ -62,6 +62,25 @@ The [setup guide](01-getting-started.md) has a credential tracker template near 
 - **Use Supabase's built-in AI too.** The Supabase dashboard has its own AI assistant (chat icon, bottom-right). It knows Supabase's docs inside out and can help with anything database-specific. Your coding AI handles the big picture; the Supabase AI handles the Supabase details.
 - **Read the [FAQ](03-faq.md) when stuck.** It covers the most common issues people hit, including the exact auth error pattern that trips up Claude Desktop and ChatGPT connections.
 
+## Adding OAuth
+
+Once your Open Brain is live, you can upgrade it to per-user OAuth 2.1 for fine-grained, per-user access control instead of a project-wide API key. Point your AI at **`docs/oauth-setup.md`** and tell it to walk you through the upgrade. Here's how the work splits:
+
+**Your AI handles:**
+- The SQL migration and row-level security (RLS) updates
+- Deploying the Supabase Edge Function via `scripts/deploy-function.sh`
+- Deploying the consent app to Vercel via `vercel --prod`
+- Setting environment secrets in both Supabase and Vercel
+- Running curl tests to verify the OAuth flow works
+
+**You handle the dashboard clicks:**
+- Supabase dashboard: enabling OAuth Server, configuring OAuth Providers, creating an OAuth App, and setting the callback URLs
+- GitHub: creating and configuring a GitHub OAuth app for sign-in
+- Vercel: adding environment variables for the consent app
+- Claude Desktop: adding the new OAuth-backed connector
+
+**Watch for the gotcha:** Supabase confidential clients default to `client_secret_basic` authentication, but Claude (and some other clients) require `client_secret_post`. If they don't match, you'll get `invalid_credentials` errors when authenticating. Check the gotchas and troubleshooting section in `docs/oauth-setup.md` if this happens — it's the most reliable place to trip up.
+
 ## After Setup
 
 Once your Open Brain is running, check out the [Extensions learning path](../README.md#extensions--the-learning-path). Same approach works — point your AI at an extension's README and build together.
