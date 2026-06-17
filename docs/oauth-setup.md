@@ -100,7 +100,7 @@ Then in the Vercel project's settings → Environment Variables, set:
 | `NEXT_PUBLIC_SUPABASE_URL` | `https://<project-ref>.supabase.co` |
 | `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Your Supabase **publishable** (anon) key — not the service role key |
 
-Redeploy after setting these (`vercel --prod` again) if the variables weren't set before the first deploy.
+**Important — the consent app reads these at runtime, so a deploy made *before* they are set returns a 500 (`MIDDLEWARE_INVOCATION_FAILED`).** Either add both variables to the Vercel project *before* the first `vercel --prod`, or set them now and **redeploy** (`vercel --prod` again) so the build picks them up.
 
 ### Step 3 — Enable the Supabase OAuth Server
 
@@ -113,7 +113,11 @@ In the Supabase dashboard → Authentication → OAuth Server:
 
 This makes the consent URL `<vercel-origin>/oauth/consent`, which is where Supabase Auth will redirect users during the authorization-code flow.
 
-Still in Authentication → URL Configuration, add `<vercel-origin>/auth/callback` to the **Redirect URLs** allow-list. This is the user-login return URL the consent app passes to `signInWithOAuth` — it is distinct from Claude's redirect URI (that comes in Step 5).
+Then — **don't skip this** — go to Authentication → URL Configuration and:
+
+- Add `<vercel-origin>/auth/callback` to the **Redirect URLs** allow-list.
+
+This is the user-login return URL the consent app passes to `signInWithOAuth`. If it's missing, GitHub login completes but Supabase refuses the redirect back into the consent app. It is **distinct** from Claude's redirect URI (that comes in Step 5).
 
 ### Step 4 — Enable the GitHub identity provider
 
@@ -229,7 +233,7 @@ Don't cross the three client/callback pairs described above. Common mistakes:
 Supabase matches redirect URIs by exact string. No trailing slash, no case differences, no HTTP vs. HTTPS substitution. If the URI registered with the OAuth client doesn't match character-for-character what Claude sends, the authorization will fail.
 
 ### Rotate any exposed secret
-If a `client_secret`, `OAUTH_ISSUER` value, or any other credential is exposed, rotate it. The resource server reads none of the client secrets — it only needs `OAUTH_ISSUER`, `OAUTH_RESOURCE`, and `OAUTH_CLIENT_ID` as function secrets.
+If a real credential is exposed (the OAuth client's **client_secret**, the **GitHub OAuth app secret**, or your Supabase **secret/service-role key**), rotate it. Note that `OAUTH_ISSUER`, `OAUTH_RESOURCE`, and `OAUTH_CLIENT_ID` are **not** secrets — they're public identifiers/URLs — even though they're stored via `supabase secrets set`. The resource server reads none of the OAuth *client* secrets; it only needs those three identifiers plus the (publishable) `SUPABASE_ANON_KEY`.
 
 ---
 
