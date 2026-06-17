@@ -87,7 +87,7 @@ deno run --allow-net --allow-read --allow-write --allow-env pull-gmail.ts --labe
 deno run --allow-net --allow-read --allow-write --allow-env pull-gmail.ts --window=90d --limit=500 --exclude-from=you+cc@gmail.com
 
 # Import a SECOND Gmail account into the same brain (its own token cache)
-deno run --allow-net --allow-read --allow-write --allow-env pull-gmail.ts --window=all --token-file=token-second.json
+deno run --allow-net --allow-read --allow-write --allow-env pull-gmail.ts --window=all --limit=100000 --token-file=token-second.json
 
 # List all Gmail labels
 deno run --allow-net --allow-read --allow-write --allow-env pull-gmail.ts --list-labels
@@ -117,8 +117,10 @@ deno run --allow-net --allow-read --allow-write --allow-env pull-gmail.ts --list
 The Gmail token in `token.json` is bound to whichever Google account you first authorized (`users/me` = the token's owner). To pull a second account, give it its own token cache with `--token-file` so you don't have to overwrite the first one:
 
 ```bash
-deno run --allow-net --allow-read --allow-write --allow-env pull-gmail.ts --window=all --token-file=token-second.json
+deno run --allow-net --allow-read --allow-write --allow-env pull-gmail.ts --window=all --limit=100000 --token-file=token-second.json
 ```
+
+> **Don't forget `--limit`.** `--window=all` only sets the time range; the default `--limit` is **50**, so `--window=all` *without* a high `--limit` stops after 50 messages. Pass a large `--limit` (e.g. `100000`) for a full-history import.
 
 The first run with a new `--token-file` opens Gmail consent for that account (add the address as a Google **test user** first — see Troubleshooting). Both accounts feed the **same Open Brain**: the Supabase identity comes from your GitHub sign-in (`supabase-token.json`), not from the Gmail account, so everything lands under your one `user_id`. The shared `sync-log.json` is safe across accounts — Gmail message IDs don't collide, so nothing gets wrongly skipped.
 
