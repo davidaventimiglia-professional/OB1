@@ -139,7 +139,14 @@ Each imported email becomes one row in the `thoughts` table:
 
 **Supabase sign-in fails / `redirect_to is not allowed`:** Add `http://localhost:3848/callback` to the Supabase **Redirect URLs** allow-list (Authentication → URL Configuration → `additional_redirect_urls`). The GitHub sign-in returns the auth code there.
 
-**`Access blocked: ... can only be used within its organization` (Error 403: `org_internal`):** Your OAuth consent screen is set to **User Type: Internal**, which restricts authorization to accounts in the same Google Workspace organization that owns the Cloud project. A personal `@gmail.com` account (or any account outside that org) is blocked before consent. Fix it in **Google Cloud Console → APIs & Services → OAuth consent screen** by changing **User Type from Internal → External**. After switching, the app starts in **Testing** status, so add the Gmail account you want to import under **Test users** (or publish to production). Note that `gmail.readonly` is a restricted scope: an unverified published app still works for the project owner but shows an "unverified app" warning to other users.
+**`Access blocked: ... can only be used within its organization` (Error 403: `org_internal`):** Your OAuth consent screen is set to **User Type: Internal**, which restricts authorization to accounts in the same Google Workspace organization that owns the Cloud project. A personal `@gmail.com` account (or any account outside that org) is blocked before consent.
+
+To fix this:
+1. Go to **Google Cloud Console → APIs & Services → OAuth consent screen**.
+2. Change **User Type** from **Internal** to **External**.
+3. Since the app will start in **Testing** status, add the Gmail account you want to import under **Test users** (or publish to production).
+
+*Note: `gmail.readonly` is a restricted scope. An unverified published app still works for the project owner but shows an "unverified app" warning to other users.*
 
 **`new row violates row-level security policy` (Postgres `42501`):** The insert isn't running as your authenticated user. Most often `SUPABASE_ANON_KEY` is set but no user token is attached — confirm the Supabase sign-in completed and `supabase-token.json` exists. Note the anon/publishable key alone runs as the `anon` role (for which the RLS `WITH CHECK (user_id = auth.uid())` fails because `auth.uid()` is `NULL`); the import must present your user access token as the `Authorization: Bearer` so it runs as `authenticated`. (Do **not** "fix" this by switching to the service-role key — that bypasses RLS and breaks multi-tenancy.)
 
