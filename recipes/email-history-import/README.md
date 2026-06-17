@@ -8,15 +8,19 @@ Your email is full of decisions, commitments, and context that your AI has never
 
 Pulls your Gmail history via the Gmail API and loads each email into Open Brain as a single thought. The script generates embeddings and extracts metadata (topics, people, action items) locally via OpenRouter, then inserts directly into Supabase with SHA-256 content fingerprint dedup.
 
+The import **authenticates as you** — on first run it signs you in through Open Brain's OAuth (GitHub) flow and inserts with your user access token, so Supabase Row-Level Security scopes every imported thought to your account. It does **not** use the service-role key and never bypasses RLS. See [docs/auth.md](../../docs/auth.md) and [schemas/oauth-rls](../../schemas/oauth-rls/README.md) for the tenancy model.
+
 **One email = one thought.** No chunking, no parent/child relationships. This aligns with how the OB1 community handles long content (truncate for embedding, store full content).
 
 ## Prerequisites
 
-- Working Open Brain setup ([guide](../../docs/01-getting-started.md))
+- Working Open Brain setup ([guide](../../docs/01-getting-started.md)), including the OAuth resource-server setup ([docs/auth.md](../../docs/auth.md), [oauth-setup.md](../../docs/oauth-setup.md)) and the [`oauth-rls`](../../schemas/oauth-rls/README.md) migration applied
 - Deno runtime installed
 - Google Cloud project with Gmail API enabled
 - Gmail API OAuth credentials (Client ID + Client Secret)
 - OpenRouter API key (same one from your Open Brain setup)
+- Your Supabase **anon/publishable** key (the import signs you in as a user — no service-role key needed)
+- Ability to sign in with your Open Brain login provider (GitHub) in a browser
 
 ## Credential Tracker
 
@@ -27,9 +31,9 @@ EMAIL HISTORY IMPORT -- CREDENTIAL TRACKER
 --------------------------------------
 
 FROM YOUR OPEN BRAIN SETUP
-  Supabase Project URL:  ____________
-  Supabase Service Key:  ____________
-  OpenRouter API Key:    ____________
+  Supabase Project URL:        ____________
+  Supabase Anon/Publishable Key: ____________
+  OpenRouter API Key:          ____________
 
 GENERATED DURING SETUP
   Google Cloud Project ID:     ____________
@@ -43,21 +47,29 @@ GENERATED DURING SETUP
 
 1. **Enable Gmail API** in your Google Cloud project
 2. **Create OAuth 2.0 credentials** (Desktop app type) and download as `credentials.json` into this folder
-3. **Set environment variables:**
+3. **Allow the import's localhost callback for Supabase sign-in.** In the Supabase dashboard → **Authentication → URL Configuration → Redirect URLs** (`additional_redirect_urls`), add:
+
+   ```text
+   http://localhost:3848/callback
+   ```
+
+   This is where the GitHub sign-in returns the authorization code. Without it, Supabase rejects the sign-in with a redirect error. (This is distinct from the Gmail callback on port `3847` and from the connector's redirect URIs.)
+4. **Set environment variables:**
 
    ```bash
    export SUPABASE_URL=https://YOUR_REF.supabase.co
-   export SUPABASE_SERVICE_ROLE_KEY=your-service-role-key
+   export SUPABASE_ANON_KEY=your-anon-or-publishable-key   # NOT the service-role key
    export OPENROUTER_API_KEY=sk-or-v1-your-key
    ```
 
-4. **First run — authenticate:**
+5. **First run — authenticate Gmail:**
 
    ```bash
    deno run --allow-net --allow-read --allow-write --allow-env pull-gmail.ts --dry-run --limit=5
    ```
 
-   This opens a browser window for OAuth consent. After authorizing, your token is cached in `token.json`.
+   This opens a browser window for Gmail OAuth consent. After authorizing, your token is cached in `token.json`. (A dry run does not touch Supabase.)
+6. **First live run — sign in to Open Brain:** the first non-dry-run import opens a browser to sign you in with GitHub (your Open Brain login provider). After approving, your Supabase session is cached in `supabase-token.json` and auto-refreshed on later runs. Imported thoughts are inserted **as you** and RLS-scoped to your account.
 
 ## Usage
 
@@ -92,7 +104,7 @@ deno run --allow-net --allow-read --allow-write --allow-env pull-gmail.ts --list
 
 ### Ingestion modes
 
-**Default (Supabase direct insert)** — The script generates embeddings and extracts metadata via OpenRouter, then inserts directly into Supabase with content fingerprint dedup. Requires `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `OPENROUTER_API_KEY`. This matches the pattern used by the ChatGPT import and MCP server.
+**Default (Supabase direct insert, as the authenticated user)** — The script generates embeddings and extracts metadata via OpenRouter, then inserts directly into Supabase with content fingerprint dedup. It authenticates **as you** (anon/publishable key + your user OAuth access token), so the insert runs as the `authenticated` role: `user_id` is stamped from `auth.uid()`, RLS scopes the row to your account, and dedup is per-user. Requires `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `OPENROUTER_API_KEY`. The service-role key is **not** used and RLS is never bypassed — see [docs/auth.md](../../docs/auth.md).
 
 **`--ingest-endpoint`** — POSTs to a custom Edge Function endpoint that handles embedding and metadata server-side. Requires `INGEST_URL` and `INGEST_KEY`. Use this if you have a custom ingest-thought function deployed.
 
@@ -123,11 +135,15 @@ Each imported email becomes one row in the `thoughts` table:
 
 ## Troubleshooting
 
-**OAuth flow fails:** Make sure your redirect URI in Google Cloud Console is `http://localhost:3847/callback`.
+**Gmail OAuth flow fails:** Make sure your redirect URI in Google Cloud Console is `http://localhost:3847/callback`.
+
+**Supabase sign-in fails / `redirect_to is not allowed`:** Add `http://localhost:3848/callback` to the Supabase **Redirect URLs** allow-list (Authentication → URL Configuration → `additional_redirect_urls`). The GitHub sign-in returns the auth code there.
 
 **`Access blocked: ... can only be used within its organization` (Error 403: `org_internal`):** Your OAuth consent screen is set to **User Type: Internal**, which restricts authorization to accounts in the same Google Workspace organization that owns the Cloud project. A personal `@gmail.com` account (or any account outside that org) is blocked before consent. Fix it in **Google Cloud Console → APIs & Services → OAuth consent screen** by changing **User Type from Internal → External**. After switching, the app starts in **Testing** status, so add the Gmail account you want to import under **Test users** (or publish to production). Note that `gmail.readonly` is a restricted scope: an unverified published app still works for the project owner but shows an "unverified app" warning to other users.
 
-**No thoughts appear:** Check that `SUPABASE_SERVICE_ROLE_KEY` is your service role key (not the anon key). RLS blocks anon inserts.
+**`new row violates row-level security policy` (Postgres `42501`):** The insert isn't running as your authenticated user. Most often `SUPABASE_ANON_KEY` is set but no user token is attached — confirm the Supabase sign-in completed and `supabase-token.json` exists. Note the anon/publishable key alone runs as the `anon` role (for which the RLS `WITH CHECK (user_id = auth.uid())` fails because `auth.uid()` is `NULL`); the import must present your user access token as the `Authorization: Bearer` so it runs as `authenticated`. (Do **not** "fix" this by switching to the service-role key — that bypasses RLS and breaks multi-tenancy.)
+
+**No thoughts appear after a successful import:** Confirm you signed in as the correct user — RLS scopes thoughts to `user_id = auth.uid()`, so they're only visible to that account (and to the service role). Delete `supabase-token.json` and re-run to switch accounts.
 
 **Re-running imports the same emails:** The `sync-log.json` file tracks imported Gmail IDs. Delete it to re-import everything. Content fingerprints provide a second layer of dedup at the database level.
 

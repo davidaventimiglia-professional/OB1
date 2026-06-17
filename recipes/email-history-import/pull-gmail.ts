@@ -8,8 +8,10 @@
  * content fingerprint dedup.
  *
  * Ingestion modes:
- *   Default:              Supabase direct insert (requires SUPABASE_URL,
- *                         SUPABASE_SERVICE_ROLE_KEY, OPENROUTER_API_KEY)
+ *   Default:              Supabase direct insert as the authenticated user via a
+ *                         GitHub OAuth (PKCE) sign-in — RLS-scoped, no service-role
+ *                         key (requires SUPABASE_URL, SUPABASE_ANON_KEY,
+ *                         OPENROUTER_API_KEY)
  *   --ingest-endpoint:    Custom endpoint (requires INGEST_URL, INGEST_KEY)
  *
  * Usage:
@@ -35,10 +37,17 @@ const SYNC_LOG_PATH = `${SCRIPT_DIR}sync-log.json`;
 const GMAIL_API = "https://gmail.googleapis.com/gmail/v1/users/me";
 const SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"];
 
-// Supabase direct insert (default mode)
+// Supabase direct insert (default mode). The import authenticates AS THE USER via
+// an OAuth (GitHub) sign-in and inserts with the anon key + the user's access
+// token, so RLS scopes every row to that user (user_id = auth.uid()). No
+// service-role key and no RLS bypass — the import is a normal authenticated tenant.
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL") || "";
-const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || "";
+const SUPABASE_ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY") || "";
 const OPENROUTER_API_KEY = Deno.env.get("OPENROUTER_API_KEY") || "";
+
+const SUPABASE_TOKEN_PATH = `${SCRIPT_DIR}supabase-token.json`;
+const SUPABASE_AUTH_PORT = 3848;
+const SUPABASE_REDIRECT_URI = `http://localhost:${SUPABASE_AUTH_PORT}/callback`;
 
 // Edge Function endpoint (--ingest-endpoint mode)
 const INGEST_URL = Deno.env.get("INGEST_URL") || "";
@@ -263,6 +272,155 @@ async function authorize(creds: OAuthCredentials): Promise<string> {
   await saveToken(newToken);
   console.log("\nAuthorization successful! Token saved.\n");
   return newToken.access_token;
+}
+
+// ─── Supabase OAuth (authenticate AS THE USER) ───────────────────────────────
+//
+// The import signs in as a Supabase user (GitHub, the same provider the connector
+// uses) via the OAuth 2.1 PKCE flow, then inserts with the anon key + the user's
+// access token. The insert runs as the `authenticated` role, so `user_id` is
+// stamped from `auth.uid()` and RLS enforces tenant scoping. See docs/auth.md.
+
+interface SupabaseToken {
+  access_token: string;
+  refresh_token: string;
+  expires_at: number; // unix seconds
+}
+
+let supabaseToken: SupabaseToken | null = null;
+
+function base64url(bytes: Uint8Array): string {
+  let bin = "";
+  for (const b of bytes) bin += String.fromCharCode(b);
+  return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+function generateCodeVerifier(): string {
+  const bytes = new Uint8Array(32);
+  crypto.getRandomValues(bytes);
+  return base64url(bytes);
+}
+
+async function codeChallenge(verifier: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier));
+  return base64url(new Uint8Array(digest));
+}
+
+async function loadSupabaseToken(): Promise<SupabaseToken | null> {
+  try {
+    return JSON.parse(await Deno.readTextFile(SUPABASE_TOKEN_PATH));
+  } catch {
+    return null;
+  }
+}
+
+async function saveSupabaseToken(token: SupabaseToken): Promise<void> {
+  await Deno.writeTextFile(SUPABASE_TOKEN_PATH, JSON.stringify(token, null, 2));
+}
+
+function tokenFromResponse(data: Record<string, unknown>): SupabaseToken {
+  return {
+    access_token: data.access_token as string,
+    refresh_token: data.refresh_token as string,
+    expires_at: (data.expires_at as number) ??
+      Math.floor(Date.now() / 1000) + ((data.expires_in as number) ?? 3600),
+  };
+}
+
+async function refreshSupabaseToken(refreshToken: string): Promise<SupabaseToken> {
+  const res = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=refresh_token`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", apikey: SUPABASE_ANON_KEY },
+    body: JSON.stringify({ refresh_token: refreshToken }),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(`Supabase token refresh failed: ${data.error_description || data.error || res.status}`);
+  }
+  const token = tokenFromResponse(data);
+  await saveSupabaseToken(token);
+  return token;
+}
+
+// Sign the user in (interactive on first run, cached + auto-refreshed after).
+// Populates the module-level supabaseToken.
+async function authorizeSupabase(): Promise<void> {
+  const cached = await loadSupabaseToken();
+  if (cached) {
+    const now = Math.floor(Date.now() / 1000);
+    if (cached.expires_at - 60 > now) {
+      supabaseToken = cached;
+      return;
+    }
+    try {
+      supabaseToken = await refreshSupabaseToken(cached.refresh_token);
+      console.log("Supabase session refreshed.\n");
+      return;
+    } catch (e) {
+      console.log(`Supabase refresh failed (${(e as Error).message}); re-authenticating.\n`);
+    }
+  }
+
+  // First-time / expired: interactive GitHub sign-in via PKCE.
+  const verifier = generateCodeVerifier();
+  const challenge = await codeChallenge(verifier);
+  const authUrl = new URL(`${SUPABASE_URL}/auth/v1/authorize`);
+  authUrl.searchParams.set("provider", "github");
+  authUrl.searchParams.set("redirect_to", SUPABASE_REDIRECT_URI);
+  authUrl.searchParams.set("code_challenge", challenge);
+  authUrl.searchParams.set("code_challenge_method", "s256");
+
+  console.log("\nSign in to Open Brain (GitHub) to authorize the import:\n");
+  console.log(authUrl.toString());
+  console.log("\nWaiting for sign-in...");
+
+  const code = await new Promise<string>((resolve, reject) => {
+    const server = Deno.serve({ port: SUPABASE_AUTH_PORT, onListen: () => {} }, (req) => {
+      const url = new URL(req.url);
+      const authCode = url.searchParams.get("code");
+      const err = url.searchParams.get("error_description") || url.searchParams.get("error");
+      if (authCode) {
+        resolve(authCode);
+        setTimeout(() => server.shutdown(), 100);
+        return new Response(
+          "<html><body><h2>Signed in!</h2><p>You can close this tab and return to your terminal.</p></body></html>",
+          { headers: { "Content-Type": "text/html" } },
+        );
+      }
+      if (err) {
+        reject(new Error(err));
+        setTimeout(() => server.shutdown(), 100);
+        return new Response(
+          `<html><body><h2>Sign-in failed</h2><p>${err}</p></body></html>`,
+          { status: 400, headers: { "Content-Type": "text/html" } },
+        );
+      }
+      return new Response("Waiting for sign-in...", { status: 400 });
+    });
+  });
+
+  const res = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=pkce`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", apikey: SUPABASE_ANON_KEY },
+    body: JSON.stringify({ auth_code: code, code_verifier: verifier }),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(`Supabase code exchange failed: ${data.error_description || data.error || res.status}`);
+  }
+  supabaseToken = tokenFromResponse(data);
+  await saveSupabaseToken(supabaseToken);
+  console.log("\nSupabase sign-in successful! Session saved.\n");
+}
+
+// Returns a non-expired access token, refreshing transparently mid-import.
+async function getSupabaseAccessToken(): Promise<string> {
+  if (!supabaseToken) throw new Error("Not signed in to Supabase (call authorizeSupabase first).");
+  const now = Math.floor(Date.now() / 1000);
+  if (supabaseToken.expires_at - 60 <= now) {
+    supabaseToken = await refreshSupabaseToken(supabaseToken.refresh_token);
+  }
+  return supabaseToken.access_token;
 }
 
 // ─── Gmail API Helpers ───────────────────────────────────────────────────────
@@ -684,12 +842,17 @@ async function ingestThoughtDirect(
     row.content_fingerprint = fingerprint;
   }
 
+  // Insert as the authenticated user: anon key + the user's OAuth access token.
+  // RLS stamps user_id from auth.uid() and scopes the row to this tenant.
+  // user_id is intentionally NOT set here — the column default (auth.uid()) fills it.
+  const accessToken = await getSupabaseAccessToken();
+
   const res = await fetch(`${SUPABASE_URL}/rest/v1/thoughts`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      apikey: SUPABASE_SERVICE_ROLE_KEY,
-      Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+      apikey: SUPABASE_ANON_KEY,
+      Authorization: `Bearer ${accessToken}`,
       Prefer: "return=representation",
     },
     body: JSON.stringify(row),
@@ -718,8 +881,8 @@ async function ingestThoughtDirect(
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          apikey: SUPABASE_SERVICE_ROLE_KEY,
-          Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+          apikey: SUPABASE_ANON_KEY,
+          Authorization: `Bearer ${accessToken}`,
           Prefer: "return=representation",
         },
         body: JSON.stringify(row),
@@ -843,8 +1006,8 @@ async function main() {
         Deno.exit(1);
       }
     } else {
-      if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
-        console.error("\nSUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are required for live mode.");
+      if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
+        console.error("\nSUPABASE_URL and SUPABASE_ANON_KEY are required for live mode.");
         console.error("Example: export SUPABASE_URL=https://YOUR_REF.supabase.co");
         Deno.exit(1);
       }
@@ -852,6 +1015,8 @@ async function main() {
         console.error("\nOPENROUTER_API_KEY is required for embedding + metadata extraction.");
         Deno.exit(1);
       }
+      // Sign in as the user once, up front, before the (possibly long) import loop.
+      await authorizeSupabase();
     }
   }
 
