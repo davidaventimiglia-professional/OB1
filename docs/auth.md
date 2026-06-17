@@ -178,21 +178,26 @@ These are hosted / Supabase-dashboard actions performed **outside** this repo �
 they are not done in code:
 
 1. **Enable Authentication → OAuth Server** in the Supabase dashboard, with
-   **dynamic client registration OFF**. Set **Site URL** to your project URL
-   (`https://<project-ref>.supabase.co`) and **Authorization Path** to
-   `/functions/v1/oauth-consent`.
-2. **Deploy the consent page.** It is now an Edge Function **in this repo** at
-   `oauth-consent/` (deployed as `oauth-consent` with `verify_jwt = false`); it is
-   no longer an external page. See `oauth-consent/README.md`. Combined with the
-   Authorization Path above, the consent URL resolves to
-   `<project-url>/functions/v1/oauth-consent`.
+   **dynamic client registration OFF**. Set **Site URL** to the **Vercel consent
+   app's** production origin (e.g. `https://<your-app>.vercel.app`) and
+   **Authorization Path** to `/oauth/consent`. Combined, these make the consent
+   URL `<vercel-origin>/oauth/consent`.
+2. **Deploy the consent page to Vercel.** It is a **Next.js app in this repo** at
+   `oauth-consent/`, deployed with `vercel --prod` (see `oauth-consent/README.md`).
+   Set `NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_ANON_KEY` (use the
+   Supabase **publishable** key) in the Vercel project's environment. It is hosted
+   on Vercel rather than as a Supabase Edge Function because Supabase rewrites
+   Edge-Function HTML on the default `*.supabase.co` domain to `text/plain` with a
+   `sandbox` CSP (real HTML there needs a Pro custom domain), which breaks an
+   interactive consent page.
 3. **Enable the GitHub auth provider** (register a GitHub OAuth app and set its
-   client id/secret in the dashboard). The consent page signs the user in with
-   GitHub before showing the approve/deny screen.
-4. **Add `<project-url>/functions/v1/oauth-consent` to the redirect allow-list**
+   client id/secret in the dashboard; its Authorization callback URL is
+   `https://<project-ref>.supabase.co/auth/v1/callback`). The consent page signs
+   the user in with GitHub before showing the approve/deny screen.
+4. **Add `<vercel-origin>/auth/callback` to the redirect allow-list**
    (`additional_redirect_urls`). This is the **user-login** return URL the consent
-   function passes to `signInWithOAuth` — distinct from Claude's OAuth-*client*
-   redirect URI in the next item.
+   app passes to `signInWithOAuth` — distinct from Claude's OAuth-*client* redirect
+   URI in the next item.
 5. **Register the OAuth client** and capture its `client_id` and `client_secret`.
    Set `OAUTH_CLIENT_ID` as a function secret. The **`client_secret`** is **not**
    read by this function — it is used by the connector / authorization-server
