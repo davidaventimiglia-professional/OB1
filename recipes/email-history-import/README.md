@@ -122,14 +122,14 @@ deno run --allow-net --allow-read --allow-write --allow-env pull-gmail.ts --wind
 
 > **Don't forget `--limit`.** `--window=all` only sets the time range; the default `--limit` is **50**, so `--window=all` *without* a high `--limit` stops after 50 messages. Pass a large `--limit` (e.g. `100000`) for a full-history import.
 
-The first run with a new `--token-file` opens Gmail consent for that account (add the address as a Google **test user** first — see Troubleshooting). Both accounts feed the **same Open Brain**: the Supabase identity comes from your GitHub sign-in (`supabase-token.json`), not from the Gmail account, so everything lands under your one `user_id`. The shared `sync-log.json` is safe across accounts — Gmail message IDs don't collide, so nothing gets wrongly skipped.
+The first run with a new `--token-file` opens Gmail consent for that account (add the address as a Google **test user** first — see Troubleshooting). Both accounts feed the **same Open Brain**: the Supabase identity comes from your GitHub sign-in (`supabase-token.json`), not from the Gmail account, so everything lands under your one `user_id`. Dedup is scoped per account — each imported thought records its `gmail_account`, so the two mailboxes stay distinct even in the unlikely event two of them share a Gmail message ID.
 
 ## How It Works
 
 1. **Fetch** emails from Gmail API by label and time window
 2. **Extract** body (base64 decode, HTML-to-text, strip quoted replies and signatures)
 3. **Filter** out noise (no-reply senders, receipts, auto-generated, <10 words)
-4. **Deduplicate** via sync-log (tracks Gmail message IDs already imported)
+4. **Deduplicate** against the database — at startup the script reads back the `gmail_id`s already imported for this account (RLS-scoped to you) and skips them, so no local state file is needed
 5. **Embed** content via OpenRouter (`text-embedding-3-small`)
 6. **Classify** via LLM (topics, type, people, action items)
 7. **Upsert** into Supabase with SHA-256 [content fingerprint](../../primitives/content-fingerprint-dedup/README.md) — re-running produces zero duplicates
@@ -146,7 +146,7 @@ The first run with a new `--token-file` opens Gmail consent for that account (ad
 Each imported email becomes one row in the `thoughts` table:
 - `content`: Email body with context prefix (`[Email from X | Subject: Y | Date: Z]`)
 - `embedding`: 1536-dim vector for semantic search (truncated to 8K chars)
-- `metadata`: LLM-extracted topics, type, people, action items, plus `source: "gmail"`, `gmail_id`, `gmail_labels`, `gmail_thread_id`
+- `metadata`: LLM-extracted topics, type, people, action items, plus `source: "gmail"`, `gmail_id`, `gmail_account`, `gmail_labels`, `gmail_thread_id`
 - `content_fingerprint`: Normalized SHA-256 hash for dedup (see [content fingerprint primitive](../../primitives/content-fingerprint-dedup/README.md))
 
 ## Troubleshooting
@@ -168,6 +168,6 @@ To fix this:
 
 **No thoughts appear after a successful import:** Confirm you signed in as the correct user — RLS scopes thoughts to `user_id = auth.uid()`, so they're only visible to that account (and to the service role). Delete `supabase-token.json` and re-run to switch accounts.
 
-**Re-running imports the same emails:** The `sync-log.json` file tracks imported Gmail IDs. Delete it to re-import everything. Content fingerprints provide a second layer of dedup at the database level.
+**Re-running re-imports the same emails:** Dedup is sourced from the database — the script skips any `gmail_id` already stored for this account. If a re-run isn't skipping them, you're probably signed in as a different Supabase user (RLS scopes thoughts per user) or pulling a different Gmail account. Content fingerprints are a second layer of dedup at the database level, so even a forced re-run won't create duplicate rows. (There is no longer a local `sync-log.json`; you can delete any leftover one.)
 
 **Embedding/metadata errors:** Verify your `OPENROUTER_API_KEY` has credits. The script calls OpenRouter for both embedding generation and metadata extraction.

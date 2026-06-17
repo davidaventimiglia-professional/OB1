@@ -33,7 +33,6 @@
 const SCRIPT_DIR = new URL(".", import.meta.url).pathname;
 const CREDENTIALS_PATH = `${SCRIPT_DIR}credentials.json`;
 let TOKEN_PATH = `${SCRIPT_DIR}token.json`; // Gmail token; overridable via --token-file
-const SYNC_LOG_PATH = `${SCRIPT_DIR}sync-log.json`;
 
 const GMAIL_API = "https://gmail.googleapis.com/gmail/v1/users/me";
 const SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"];
@@ -56,24 +55,43 @@ const INGEST_KEY = Deno.env.get("INGEST_KEY") || "";
 
 const OPENROUTER_BASE = "https://openrouter.ai/api/v1";
 
-// ─── Sync Log (deduplication) ────────────────────────────────────────────────
+// ─── Deduplication state (sourced from the database) ─────────────────────────
+//
+// The database is the single source of truth for what's already imported: every
+// ingested email is a thought row with metadata.source = "gmail" and a
+// metadata.gmail_id, persisted per-insert and RLS-scoped to this user. There is
+// no local sync log — we derive the "already ingested" set from those rows at
+// startup. This makes resumability automatic (a killed run loses nothing; the
+// next run re-derives from the DB) and works from any machine.
+//
+// A message counts as already-ingested for the current account when a row exists
+// with that gmail_id whose gmail_account matches — or is absent (legacy rows
+// imported before gmail_account was stamped; those are treated as a match so a
+// re-run skips them without re-embedding).
+async function fetchIngestedGmailIds(account: string): Promise<Set<string>> {
+  const seen = new Set<string>();
+  const accessToken = await getSupabaseAccessToken();
+  const pageSize = 1000;
 
-interface SyncLog {
-  ingested_ids: Record<string, string>; // gmail_message_id -> ISO timestamp
-  last_sync: string;
-}
-
-async function loadSyncLog(): Promise<SyncLog> {
-  try {
-    const text = await Deno.readTextFile(SYNC_LOG_PATH);
-    return JSON.parse(text);
-  } catch {
-    return { ingested_ids: {}, last_sync: "" };
+  for (let offset = 0; ; offset += pageSize) {
+    const url = `${SUPABASE_URL}/rest/v1/thoughts` +
+      `?select=gmail_id:metadata->>gmail_id,gmail_account:metadata->>gmail_account` +
+      `&metadata->>source=eq.gmail&order=id.asc&limit=${pageSize}&offset=${offset}`;
+    const res = await fetch(url, {
+      headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${accessToken}` },
+    });
+    if (!res.ok) {
+      throw new Error(`Failed to load already-ingested IDs: HTTP ${res.status}: ${await res.text()}`);
+    }
+    const rows = (await res.json()) as Array<{ gmail_id: string | null; gmail_account: string | null }>;
+    for (const r of rows) {
+      if (r.gmail_id && (r.gmail_account == null || r.gmail_account === account)) {
+        seen.add(r.gmail_id);
+      }
+    }
+    if (rows.length < pageSize) break;
   }
-}
-
-async function saveSyncLog(log: SyncLog): Promise<void> {
-  await Deno.writeTextFile(SYNC_LOG_PATH, JSON.stringify(log, null, 2));
+  return seen;
 }
 
 // ─── Content Fingerprint ────────────────────────────────────────────────────
@@ -451,6 +469,13 @@ interface GmailLabel {
 async function listLabels(accessToken: string): Promise<GmailLabel[]> {
   const data = (await gmailFetch(accessToken, "/labels")) as { labels: GmailLabel[] };
   return data.labels;
+}
+
+// The email address of the authorized Gmail account (the token owner). Used to
+// scope dedup and stamp provenance, so multiple accounts stay distinct.
+async function getGmailAddress(accessToken: string): Promise<string> {
+  const data = (await gmailFetch(accessToken, "/profile")) as { emailAddress: string };
+  return data.emailAddress;
 }
 
 function windowToQuery(window: string): string {
@@ -996,6 +1021,9 @@ async function main() {
     labelMap.set(l.id, l.name);
   }
 
+  // Which Gmail account this token belongs to — scopes dedup and stamps provenance.
+  const gmailAddress = await getGmailAddress(accessToken);
+
   // Determine ingestion mode
   const useEndpoint = args.ingestEndpoint;
   const ingestMode = args.dryRun ? "DRY RUN" : useEndpoint ? "Edge Function endpoint" : "Supabase direct insert";
@@ -1044,7 +1072,16 @@ async function main() {
     }
   }
 
-  const syncLog = await loadSyncLog();
+  // Already-imported set, derived from the database (the source of truth).
+  // Live direct mode only — that's where we hold a Supabase session and can read
+  // back. Endpoint mode leans on the server's fingerprint dedup; a dry run shows
+  // the raw Gmail selection without dedup (it never signs in to Supabase).
+  let seen = new Set<string>();
+  if (!args.dryRun && !useEndpoint) {
+    seen = await fetchIngestedGmailIds(gmailAddress);
+    console.log(`Already in Open Brain for ${gmailAddress}: ${seen.size}`);
+  }
+
   const messageRefs = await listMessages(accessToken, args.labels, query, args.limit);
   console.log(`\nFound ${messageRefs.length} messages.\n`);
 
@@ -1058,7 +1095,7 @@ async function main() {
   let totalWords = 0;
 
   for (const ref of messageRefs) {
-    if (syncLog.ingested_ids[ref.id]) {
+    if (seen.has(ref.id)) {
       alreadyIngested++;
       continue;
     }
@@ -1098,6 +1135,7 @@ async function main() {
       gmail_labels: gmailLabels,
       gmail_id: email.gmailId,
       gmail_thread_id: email.threadId,
+      gmail_account: gmailAddress,
     };
 
     const content = buildEmailContent(email.body, email.from, email.subject, email.date);
@@ -1107,7 +1145,7 @@ async function main() {
 
     if (result.ok) {
       ingested++;
-      syncLog.ingested_ids[ref.id] = new Date().toISOString();
+      seen.add(ref.id); // avoid re-processing if the same id appears under multiple labels
       const dupTag = result.duplicate ? " (duplicate — skipped)" : "";
       console.log(`   -> Ingested: ${result.type} — ${(result.topics || []).join(", ")}${dupTag}`);
     } else {
@@ -1119,11 +1157,7 @@ async function main() {
     await new Promise((r) => setTimeout(r, 200));
   }
 
-  // Save sync log
-  if (!args.dryRun) {
-    syncLog.last_sync = new Date().toISOString();
-    await saveSyncLog(syncLog);
-  }
+  // No local state to persist — the database already recorded every insert.
 
   // Summary
   console.log("\u2500".repeat(60));
