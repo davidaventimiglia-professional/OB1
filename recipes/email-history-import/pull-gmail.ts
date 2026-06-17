@@ -228,15 +228,35 @@ async function refreshAccessToken(
   return updated;
 }
 
+// Live Gmail token state so every request can refresh on demand during long
+// imports — Gmail access tokens expire ~hourly. Populated by authorize().
+let gmailToken: TokenData | null = null;
+let gmailCreds: OAuthCredentials | null = null;
+
+// Returns a non-expired Gmail access token, refreshing transparently mid-import.
+async function getGmailAccessToken(): Promise<string> {
+  if (!gmailToken || !gmailCreds) {
+    throw new Error("Gmail not authorized (call authorize first).");
+  }
+  if (Date.now() >= gmailToken.expiry_date - 60_000) {
+    console.log("Gmail access token expired, refreshing...");
+    gmailToken = await refreshAccessToken(gmailCreds, gmailToken);
+  }
+  return gmailToken.access_token;
+}
+
 async function authorize(creds: OAuthCredentials): Promise<string> {
+  gmailCreds = creds;
   let token = await loadToken();
 
   if (token) {
     if (Date.now() < token.expiry_date - 60_000) {
+      gmailToken = token;
       return token.access_token;
     }
     console.log("Access token expired, refreshing...");
     token = await refreshAccessToken(creds, token);
+    gmailToken = token;
     return token.access_token;
   }
 
@@ -293,6 +313,7 @@ async function authorize(creds: OAuthCredentials): Promise<string> {
     expiry_date: Date.now() + tokenData.expires_in * 1000,
   };
   await saveToken(newToken);
+  gmailToken = newToken;
   console.log("\nAuthorization successful! Token saved.\n");
   return newToken.access_token;
 }
@@ -448,7 +469,8 @@ async function getSupabaseAccessToken(): Promise<string> {
 
 // ─── Gmail API Helpers ───────────────────────────────────────────────────────
 
-async function gmailFetch(accessToken: string, path: string): Promise<unknown> {
+async function gmailFetch(path: string): Promise<unknown> {
+  const accessToken = await getGmailAccessToken();
   const res = await fetch(`${GMAIL_API}${path}`, {
     headers: { Authorization: `Bearer ${accessToken}` },
   });
@@ -466,15 +488,15 @@ interface GmailLabel {
   messagesTotal?: number;
 }
 
-async function listLabels(accessToken: string): Promise<GmailLabel[]> {
-  const data = (await gmailFetch(accessToken, "/labels")) as { labels: GmailLabel[] };
+async function listLabels(): Promise<GmailLabel[]> {
+  const data = (await gmailFetch("/labels")) as { labels: GmailLabel[] };
   return data.labels;
 }
 
 // The email address of the authorized Gmail account (the token owner). Used to
 // scope dedup and stamp provenance, so multiple accounts stay distinct.
-async function getGmailAddress(accessToken: string): Promise<string> {
-  const data = (await gmailFetch(accessToken, "/profile")) as { emailAddress: string };
+async function getGmailAddress(): Promise<string> {
+  const data = (await gmailFetch("/profile")) as { emailAddress: string };
   return data.emailAddress;
 }
 
@@ -517,7 +539,6 @@ interface GmailMessageRef {
 }
 
 async function listMessagesForLabel(
-  accessToken: string,
   label: string,
   query: string,
   limit: number,
@@ -531,7 +552,7 @@ async function listMessagesForLabel(
     if (query) path += `&q=${encodeURIComponent(query)}`;
     if (pageToken) path += `&pageToken=${pageToken}`;
 
-    const data = (await gmailFetch(accessToken, path)) as {
+    const data = (await gmailFetch(path)) as {
       messages?: GmailMessageRef[];
       nextPageToken?: string;
     };
@@ -546,7 +567,6 @@ async function listMessagesForLabel(
 }
 
 async function listMessages(
-  accessToken: string,
   labels: string[],
   query: string,
   limit: number,
@@ -555,7 +575,7 @@ async function listMessages(
   const allMessages: GmailMessageRef[] = [];
 
   for (const label of labels) {
-    const messages = await listMessagesForLabel(accessToken, label, query, limit);
+    const messages = await listMessagesForLabel(label, query, limit);
     for (const msg of messages) {
       if (!seen.has(msg.id)) {
         seen.add(msg.id);
@@ -587,8 +607,8 @@ interface GmailMessage {
   internalDate: string;
 }
 
-async function getMessage(accessToken: string, id: string): Promise<GmailMessage> {
-  return (await gmailFetch(accessToken, `/messages/${id}?format=full`)) as GmailMessage;
+async function getMessage(id: string): Promise<GmailMessage> {
+  return (await gmailFetch(`/messages/${id}?format=full`)) as GmailMessage;
 }
 
 function getHeader(msg: GmailMessage, name: string): string {
@@ -1000,11 +1020,11 @@ async function main() {
   }
 
   const creds = await loadCredentials();
-  const accessToken = await authorize(creds);
+  await authorize(creds); // populates the refreshable Gmail token state
 
   // --list-labels mode
   if (args.listLabels) {
-    const labels = await listLabels(accessToken);
+    const labels = await listLabels();
     console.log("\nGmail Labels:\n");
     const sorted = labels.sort((a, b) => a.name.localeCompare(b.name));
     for (const label of sorted) {
@@ -1015,14 +1035,14 @@ async function main() {
   }
 
   // Build label ID -> name map for metadata
-  const allLabels = await listLabels(accessToken);
+  const allLabels = await listLabels();
   const labelMap = new Map<string, string>();
   for (const l of allLabels) {
     labelMap.set(l.id, l.name);
   }
 
   // Which Gmail account this token belongs to — scopes dedup and stamps provenance.
-  const gmailAddress = await getGmailAddress(accessToken);
+  const gmailAddress = await getGmailAddress();
 
   // Determine ingestion mode
   const useEndpoint = args.ingestEndpoint;
@@ -1082,7 +1102,7 @@ async function main() {
     console.log(`Already in Open Brain for ${gmailAddress}: ${seen.size}`);
   }
 
-  const messageRefs = await listMessages(accessToken, args.labels, query, args.limit);
+  const messageRefs = await listMessages(args.labels, query, args.limit);
   console.log(`\nFound ${messageRefs.length} messages.\n`);
 
   if (messageRefs.length === 0) return;
@@ -1100,7 +1120,7 @@ async function main() {
       continue;
     }
 
-    const msg = await getMessage(accessToken, ref.id);
+    const msg = await getMessage(ref.id);
     const email = processEmail(msg);
 
     if (!email) {
