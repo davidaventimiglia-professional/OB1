@@ -1,7 +1,9 @@
 node_modules/
 .DS_Store
 .planning/
-supabase/
+# Anchored to repo root: ignore the top-level Supabase deploy tree only, not
+# nested dirs like oauth-consent/lib/supabase/.
+/supabase/
 
 # Maintainer-local overlays (not part of upstream contribution contract)
 .local/

@@ -12,6 +12,9 @@ This isn't a notes app. It's a database with vector search and an open protocol 
 
 ## Getting Started
 
+> [!IMPORTANT]
+> **BREAKING CHANGE — core MCP server auth.** The core `open-brain-mcp` server is now an **OAuth 2.1 resource server** (Supabase Auth is the authorization server). The old static `x-brain-key` / `MCP_ACCESS_KEY` / `?key=...` connection is **retired** — connect via the OAuth connector flow instead. See **[docs/auth.md](docs/auth.md)** for the full model, required env vars, and migration steps. (Independent `recipes/` and `schemas/per-agent-identity/` contributions keep their own auth and are unaffected.)
+
 Never built an Open Brain? Start here:
 
 1. **[Setup Guide](docs/01-getting-started.md)** — Build the full system (database, AI gateway, Slack capture, MCP server) in about 45 minutes. No coding experience needed. Or watch the [video walkthrough](https://vimeo.com/1174979042/f883f6489a) (~27 min).
