@@ -121,6 +121,8 @@ Each imported email becomes one row in the `thoughts` table:
 
 **OAuth flow fails:** Make sure your redirect URI in Google Cloud Console is `http://localhost:3847/callback`.
 
+**`Access blocked: ... can only be used within its organization` (Error 403: `org_internal`):** Your OAuth consent screen is set to **User Type: Internal**, which restricts authorization to accounts in the same Google Workspace organization that owns the Cloud project. A personal `@gmail.com` account (or any account outside that org) is blocked before consent. Fix it in **Google Cloud Console → APIs & Services → OAuth consent screen** by changing **User Type from Internal → External**. After switching, the app starts in **Testing** status, so add the Gmail account you want to import under **Test users** (or publish to production). Note that `gmail.readonly` is a restricted scope: an unverified published app still works for the project owner but shows an "unverified app" warning to other users.
+
 **No thoughts appear:** Check that `SUPABASE_SERVICE_ROLE_KEY` is your service role key (not the anon key). RLS blocks anon inserts.
 
 **Re-running imports the same emails:** The `sync-log.json` file tracks imported Gmail IDs. Delete it to re-import everything. Content fingerprints provide a second layer of dedup at the database level.
