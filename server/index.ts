@@ -537,7 +537,7 @@ const corsHeaders = {
   "Access-Control-Expose-Headers": "WWW-Authenticate",
 };
 
-const app = new Hono();
+export const app = new Hono();
 
 // CORS preflight — required for browser/Electron-based clients (Claude Desktop, claude.ai)
 app.options("*", (c) => {
@@ -599,6 +599,8 @@ app.all("*", async (c) => {
   const server = buildServer(db);
   const transport = new StreamableHTTPTransport();
   await server.connect(transport);
+  // @ts-ignore -- hono and @hono/mcp pin different Context type versions; the
+  // shapes are compatible at runtime (this is the live, working request path).
   const response = await transport.handleRequest(c);
   if (!response) return c.json({ error: "No response from MCP transport" }, 500, corsHeaders);
   response.headers.delete("mcp-session-id");
@@ -606,4 +608,7 @@ app.all("*", async (c) => {
   return response;
 });
 
-Deno.serve(app.fetch);
+// Guarded so tests can `import { app }` without binding a port. The Supabase
+// Edge runtime runs this file as the entrypoint (import.meta.main === true), so
+// the server still starts in production.
+if (import.meta.main) Deno.serve(app.fetch);
