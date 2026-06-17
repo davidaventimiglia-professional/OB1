@@ -23,10 +23,10 @@ export function ConsentForm({
       </ul>
       <form style={{ display: "flex", gap: "0.75rem", marginTop: "1.5rem" }}>
         <input type="hidden" name="authorization_id" value={authorizationId} />
-        <button type="submit" formAction={decideAction} name="decision" value="approve">
+        <button type="submit" formAction={decideAction.bind(null, "approve")}>
           Approve
         </button>
-        <button type="submit" formAction={decideAction} name="decision" value="deny">
+        <button type="submit" formAction={decideAction.bind(null, "deny")}>
           Deny
         </button>
       </form>
