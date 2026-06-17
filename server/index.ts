@@ -544,12 +544,18 @@ app.options("*", (c) => {
   return c.text("ok", 200, corsHeaders);
 });
 
-// Public RFC 9728 protected-resource discovery — no auth required.
+// Public RFC 9728 protected-resource metadata builder — served below, no auth.
 const prm = () => buildProtectedResourceMetadata({ resource: OAUTH_RESOURCE, issuer: OAUTH_ISSUER });
-app.get("/functions/v1/open-brain-mcp/.well-known/oauth-protected-resource", (c) => c.json(prm(), 200, corsHeaders));
-app.get("/.well-known/oauth-protected-resource", (c) => c.json(prm(), 200, corsHeaders));
 
 app.all("*", async (c) => {
+  // Public RFC 9728 discovery — no auth. Matched by path suffix rather than a
+  // fixed route because the Supabase Edge runtime delivers the path as
+  // `/<function-slug>/…` (e.g. `/open-brain-mcp/.well-known/…`), so a hardcoded
+  // full/bare route never matches. Must run before token validation.
+  if (c.req.method === "GET" && c.req.path.endsWith("/.well-known/oauth-protected-resource")) {
+    return c.json(prm(), 200, corsHeaders);
+  }
+
   // Validate the Bearer access token; distinguish a client auth failure (401)
   // from the authorization server / JWKS being unreachable (503).
   const authz = c.req.header("authorization");
