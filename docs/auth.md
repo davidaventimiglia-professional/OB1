@@ -182,6 +182,32 @@ cp server/*.ts server/deno.json supabase/functions/open-brain-mcp/
 supabase functions deploy open-brain-mcp --no-verify-jwt
 ```
 
+### Tool descriptions and the connector cache
+
+MCP clients (including Claude.ai) read each tool's `name`, `description`, and
+input schema from the **deployed** function and **cache the tool list per
+connector**. So a change to tool metadata in `server/index.ts` — e.g. the
+`search` / `search_thoughts` descriptions — is not visible to a client until you
+both redeploy **and** refresh the connector:
+
+1. **Redeploy the function** so the new descriptions are live:
+
+   ```bash
+   supabase functions deploy open-brain-mcp --no-verify-jwt
+   ```
+
+2. **Refresh the connector** so the client re-reads the tool list. In Claude.ai
+   this usually means **removing and re-adding** the custom connector (Settings →
+   Connectors); a cached tool list will otherwise keep serving the old
+   descriptions.
+
+3. **Verify the change took effect.** For description/routing changes, ask a
+   question that should now hit the updated tool and confirm the client selects
+   it. (Tool selection is probabilistic: a sharper description improves the odds
+   that the model picks this server over a competing source connector for an
+   ambiguous query, but does not guarantee it. The most deterministic lever is a
+   client-side instruction or preference.)
+
 ## Manual prerequisites
 
 These are hosted / Supabase-dashboard actions performed **outside** this repo —
