@@ -17,6 +17,16 @@ This document is the canonical reference for how the core
 
 ## Overview
 
+Previously, the MCP server authenticated requests with a single shared static
+key (`x-brain-key` / `MCP_ACCESS_KEY`) set at deploy time — every client used
+the same secret and had access to the same data. The server is now an **OAuth
+2.1 resource server**: each request must carry a Bearer access token issued to a
+specific authenticated user. The tenant is the authenticated user, and data is
+scoped by RLS policies keyed on `auth.uid()`, so each user sees only their own
+thoughts.
+
+For step-by-step setup instructions, see [oauth-setup.md](oauth-setup.md).
+
 - The core open-brain MCP server is an OAuth 2.1 **resource server (RS)**.
 - **Supabase Auth** is the **authorization server (AS)**.
 - Access tokens are Supabase-issued **JWTs**, verified on every request by
@@ -203,6 +213,14 @@ they are not done in code:
    read by this function — it is used by the connector / authorization-server
    authorization-code exchange, so provide it to that flow (e.g. the connector
    registration) rather than as a function secret.
+
+   > **`token_endpoint_auth_method: client_secret_post` required.** Supabase
+   > confidential clients default to `client_secret_basic` (credentials in the
+   > `Authorization` header), but Claude sends credentials in the POST body
+   > (`client_secret_post`). A mismatch causes `invalid_credentials` at the token
+   > endpoint. When registering the client, explicitly set
+   > `token_endpoint_auth_method` to `client_secret_post` in the dashboard or via
+   > the Supabase Auth admin API.
 6. **Obtain Claude's exact redirect URI** from the connector dialog on
    claude.ai and register it **verbatim**. Redirect URIs are matched by exact
    string; a trailing slash or case difference will fail.
