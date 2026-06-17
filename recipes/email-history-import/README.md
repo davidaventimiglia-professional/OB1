@@ -71,6 +71,9 @@ deno run --allow-net --allow-read --allow-write --allow-env pull-gmail.ts --wind
 # Import starred emails
 deno run --allow-net --allow-read --allow-write --allow-env pull-gmail.ts --labels=STARRED
 
+# Import last 90 days, skipping your own agent/digest emails
+deno run --allow-net --allow-read --allow-write --allow-env pull-gmail.ts --window=90d --limit=500 --exclude-from=you+cc@gmail.com
+
 # List all Gmail labels
 deno run --allow-net --allow-read --allow-write --allow-env pull-gmail.ts --list-labels
 ```
@@ -81,6 +84,7 @@ deno run --allow-net --allow-read --allow-write --allow-env pull-gmail.ts --list
 |------|---------|-------------|
 | `--window=` | `24h` | Time window: `24h`, `7d`, `30d`, `90d`, `1y`, `all` |
 | `--labels=` | `SENT` | Comma-separated Gmail labels |
+| `--exclude-from=` | _(none)_ | Comma-separated senders to skip (applied as a Gmail `-from:` filter, server-side) |
 | `--limit=` | `50` | Max emails to process |
 | `--dry-run` | off | Preview without ingesting |
 | `--list-labels` | off | List all Gmail labels and exit |

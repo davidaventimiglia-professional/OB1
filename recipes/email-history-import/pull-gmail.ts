@@ -18,6 +18,7 @@
  * Options:
  *   --window=24h|7d|30d|90d|1y|all  Time window to fetch (default: 24h)
  *   --labels=SENT,STARRED           Comma-separated Gmail labels (default: SENT)
+ *   --exclude-from=a@x.com,b@y.com  Comma-separated senders to skip (Gmail -from: filter)
  *   --dry-run                       Parse and show emails without ingesting
  *   --limit=N                       Max emails to process (default: 50)
  *   --list-labels                   List all Gmail labels and exit
@@ -84,6 +85,7 @@ interface CliArgs {
   limit: number;
   listLabels: boolean;
   ingestEndpoint: boolean;
+  excludeFrom: string[];
 }
 
 function parseArgs(): CliArgs {
@@ -94,6 +96,7 @@ function parseArgs(): CliArgs {
     limit: 50,
     listLabels: false,
     ingestEndpoint: false,
+    excludeFrom: [],
   };
 
   for (const arg of Deno.args) {
@@ -105,6 +108,9 @@ function parseArgs(): CliArgs {
       args.dryRun = true;
     } else if (arg.startsWith("--limit=")) {
       args.limit = parseInt(arg.split("=")[1], 10);
+    } else if (arg.startsWith("--exclude-from=")) {
+      args.excludeFrom = arg.split("=")[1].split(",")
+        .map((a) => a.trim()).filter((a) => a.length > 0);
     } else if (arg === "--list-labels") {
       args.listLabels = true;
     } else if (arg === "--ingest-endpoint") {
@@ -817,10 +823,15 @@ async function main() {
   const ingestMode = args.dryRun ? "DRY RUN" : useEndpoint ? "Edge Function endpoint" : "Supabase direct insert";
 
   // Normal pull mode
-  const query = windowToQuery(args.window);
+  const excludeTerms = args.excludeFrom.map((a) => `-from:${a}`);
+  const query = [windowToQuery(args.window), ...excludeTerms]
+    .filter((t) => t.length > 0).join(" ");
   console.log(`\nFetching emails...`);
   console.log(`  Labels: ${args.labels.join(", ")}`);
   console.log(`  Window: ${args.window}${query ? ` (${query})` : ""}`);
+  if (args.excludeFrom.length > 0) {
+    console.log(`  Exclude: ${args.excludeFrom.join(", ")}`);
+  }
   console.log(`  Limit:  ${args.limit}`);
   console.log(`  Mode:   ${ingestMode}`);
 
