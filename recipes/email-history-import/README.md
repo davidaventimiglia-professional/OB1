@@ -86,6 +86,9 @@ deno run --allow-net --allow-read --allow-write --allow-env pull-gmail.ts --labe
 # Import last 90 days, skipping your own agent/digest emails
 deno run --allow-net --allow-read --allow-write --allow-env pull-gmail.ts --window=90d --limit=500 --exclude-from=you+cc@gmail.com
 
+# Import a SECOND Gmail account into the same brain (its own token cache)
+deno run --allow-net --allow-read --allow-write --allow-env pull-gmail.ts --window=all --token-file=token-second.json
+
 # List all Gmail labels
 deno run --allow-net --allow-read --allow-write --allow-env pull-gmail.ts --list-labels
 ```
@@ -97,6 +100,7 @@ deno run --allow-net --allow-read --allow-write --allow-env pull-gmail.ts --list
 | `--window=` | `24h` | Time window: `24h`, `7d`, `30d`, `90d`, `1y`, `all` |
 | `--labels=` | `SENT` | Comma-separated Gmail labels |
 | `--exclude-from=` | _(none)_ | Comma-separated senders to skip (applied as a Gmail `-from:` filter, server-side) |
+| `--token-file=` | `token.json` | Gmail token cache file. Give each Google account its own file to import several mailboxes without re-consenting each time. Absolute path used as-is; a bare name resolves next to the script. |
 | `--limit=` | `50` | Max emails to process |
 | `--dry-run` | off | Preview without ingesting |
 | `--list-labels` | off | List all Gmail labels and exit |
@@ -107,6 +111,16 @@ deno run --allow-net --allow-read --allow-write --allow-env pull-gmail.ts --list
 **Default (Supabase direct insert, as the authenticated user)** — The script generates embeddings and extracts metadata via OpenRouter, then inserts directly into Supabase with content fingerprint dedup. It authenticates **as you** (anon/publishable key + your user OAuth access token), so the insert runs as the `authenticated` role: `user_id` is stamped from `auth.uid()`, RLS scopes the row to your account, and dedup is per-user. Requires `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `OPENROUTER_API_KEY`. The service-role key is **not** used and RLS is never bypassed — see [docs/auth.md](../../docs/auth.md).
 
 **`--ingest-endpoint`** — POSTs to a custom Edge Function endpoint that handles embedding and metadata server-side. Requires `INGEST_URL` and `INGEST_KEY`. Use this if you have a custom ingest-thought function deployed.
+
+### Importing more than one Gmail account
+
+The Gmail token in `token.json` is bound to whichever Google account you first authorized (`users/me` = the token's owner). To pull a second account, give it its own token cache with `--token-file` so you don't have to overwrite the first one:
+
+```bash
+deno run --allow-net --allow-read --allow-write --allow-env pull-gmail.ts --window=all --token-file=token-second.json
+```
+
+The first run with a new `--token-file` opens Gmail consent for that account (add the address as a Google **test user** first — see Troubleshooting). Both accounts feed the **same Open Brain**: the Supabase identity comes from your GitHub sign-in (`supabase-token.json`), not from the Gmail account, so everything lands under your one `user_id`. The shared `sync-log.json` is safe across accounts — Gmail message IDs don't collide, so nothing gets wrongly skipped.
 
 ## How It Works
 

@@ -21,6 +21,7 @@
  *   --window=24h|7d|30d|90d|1y|all  Time window to fetch (default: 24h)
  *   --labels=SENT,STARRED           Comma-separated Gmail labels (default: SENT)
  *   --exclude-from=a@x.com,b@y.com  Comma-separated senders to skip (Gmail -from: filter)
+ *   --token-file=token-x.json       Gmail token cache file (default token.json; per-account)
  *   --dry-run                       Parse and show emails without ingesting
  *   --limit=N                       Max emails to process (default: 50)
  *   --list-labels                   List all Gmail labels and exit
@@ -31,7 +32,7 @@
 
 const SCRIPT_DIR = new URL(".", import.meta.url).pathname;
 const CREDENTIALS_PATH = `${SCRIPT_DIR}credentials.json`;
-const TOKEN_PATH = `${SCRIPT_DIR}token.json`;
+let TOKEN_PATH = `${SCRIPT_DIR}token.json`; // Gmail token; overridable via --token-file
 const SYNC_LOG_PATH = `${SCRIPT_DIR}sync-log.json`;
 
 const GMAIL_API = "https://gmail.googleapis.com/gmail/v1/users/me";
@@ -95,6 +96,7 @@ interface CliArgs {
   listLabels: boolean;
   ingestEndpoint: boolean;
   excludeFrom: string[];
+  tokenFile: string;
 }
 
 function parseArgs(): CliArgs {
@@ -106,6 +108,7 @@ function parseArgs(): CliArgs {
     listLabels: false,
     ingestEndpoint: false,
     excludeFrom: [],
+    tokenFile: "",
   };
 
   for (const arg of Deno.args) {
@@ -120,6 +123,8 @@ function parseArgs(): CliArgs {
     } else if (arg.startsWith("--exclude-from=")) {
       args.excludeFrom = arg.split("=")[1].split(",")
         .map((a) => a.trim()).filter((a) => a.length > 0);
+    } else if (arg.startsWith("--token-file=")) {
+      args.tokenFile = arg.split("=")[1].trim();
     } else if (arg === "--list-labels") {
       args.listLabels = true;
     } else if (arg === "--ingest-endpoint") {
@@ -959,6 +964,16 @@ function buildEmailContent(
 
 async function main() {
   const args = parseArgs();
+
+  // Per-account Gmail token: --token-file lets each Google account keep its own
+  // cached token (absolute path used as-is; a bare name resolves next to this script).
+  if (args.tokenFile) {
+    TOKEN_PATH = args.tokenFile.startsWith("/")
+      ? args.tokenFile
+      : `${SCRIPT_DIR}${args.tokenFile}`;
+    console.log(`Using Gmail token file: ${TOKEN_PATH}`);
+  }
+
   const creds = await loadCredentials();
   const accessToken = await authorize(creds);
 
