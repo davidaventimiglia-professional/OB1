@@ -131,7 +131,7 @@ function buildServer(db: SupabaseClient): McpServer {
     {
       title: "Search Open Brain",
       description:
-        "Search Open Brain memories by meaning. Use this read-only compatibility tool when ChatGPT needs search/fetch-style access to stored thoughts.",
+        "Search the user's Open Brain memory by meaning. Open Brain can hold notes, decisions, and content imported from other systems such as past emails and conversations. Read-only compatibility tool for search/fetch-style access to stored thoughts — use it to recall anything the user has previously captured, even when the topic sounds like it belongs to another app.",
       annotations: {
         readOnlyHint: true,
       },
@@ -233,7 +233,7 @@ function buildServer(db: SupabaseClient): McpServer {
     {
       title: "Search Thoughts",
       description:
-        "Search captured thoughts by meaning. Use this when the user asks about a topic, person, or idea they've previously captured.",
+        "Search the user's Open Brain — their long-term personal memory — by meaning. Open Brain can hold notes, decisions, commitments, people, and content imported from other systems such as past emails and chat conversations. Use this whenever the user asks to recall something they've previously said, written, decided, or were told — even when the topic sounds like it lives in another app (email, chat, docs). Prefer recalling from here over re-fetching from a source connector.",
       annotations: {
         readOnlyHint: true,
       },
