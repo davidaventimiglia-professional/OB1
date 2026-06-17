@@ -1013,6 +1013,15 @@ async function main() {
   console.log(`  Limit:  ${args.limit}`);
   console.log(`  Mode:   ${ingestMode}`);
 
+  // Footgun guard: --window=all/1y only sets the time range; the default --limit
+  // (50) silently caps the fetch. Warn when a broad window is left at the default.
+  const limitExplicit = Deno.args.some((a) => a.startsWith("--limit="));
+  if (!limitExplicit && (args.window === "all" || args.window === "1y")) {
+    console.log(
+      `  ⚠️  --window=${args.window} with the default --limit=${args.limit}: only ${args.limit} messages will be fetched. Pass a higher --limit (e.g. --limit=100000) for a full import.`,
+    );
+  }
+
   if (!args.dryRun) {
     if (useEndpoint) {
       if (!INGEST_URL || !INGEST_KEY) {
