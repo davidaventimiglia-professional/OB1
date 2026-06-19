@@ -8,8 +8,10 @@
  * content fingerprint dedup.
  *
  * Ingestion modes:
- *   Default:              Supabase direct insert (requires SUPABASE_URL,
- *                         SUPABASE_SERVICE_ROLE_KEY, OPENROUTER_API_KEY)
+ *   Default:              Supabase direct insert as the authenticated user via a
+ *                         GitHub OAuth (PKCE) sign-in — RLS-scoped, no service-role
+ *                         key (requires SUPABASE_URL, SUPABASE_ANON_KEY,
+ *                         OPENROUTER_API_KEY)
  *   --ingest-endpoint:    Custom endpoint (requires INGEST_URL, INGEST_KEY)
  *
  * Usage:
@@ -18,6 +20,8 @@
  * Options:
  *   --window=24h|7d|30d|90d|1y|all  Time window to fetch (default: 24h)
  *   --labels=SENT,STARRED           Comma-separated Gmail labels (default: SENT)
+ *   --exclude-from=a@x.com,b@y.com  Comma-separated senders to skip (Gmail -from: filter)
+ *   --token-file=token-x.json       Gmail token cache file (default token.json; per-account)
  *   --dry-run                       Parse and show emails without ingesting
  *   --limit=N                       Max emails to process (default: 50)
  *   --list-labels                   List all Gmail labels and exit
@@ -28,16 +32,22 @@
 
 const SCRIPT_DIR = new URL(".", import.meta.url).pathname;
 const CREDENTIALS_PATH = `${SCRIPT_DIR}credentials.json`;
-const TOKEN_PATH = `${SCRIPT_DIR}token.json`;
-const SYNC_LOG_PATH = `${SCRIPT_DIR}sync-log.json`;
+let TOKEN_PATH = `${SCRIPT_DIR}token.json`; // Gmail token; overridable via --token-file
 
 const GMAIL_API = "https://gmail.googleapis.com/gmail/v1/users/me";
 const SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"];
 
-// Supabase direct insert (default mode)
+// Supabase direct insert (default mode). The import authenticates AS THE USER via
+// an OAuth (GitHub) sign-in and inserts with the anon key + the user's access
+// token, so RLS scopes every row to that user (user_id = auth.uid()). No
+// service-role key and no RLS bypass — the import is a normal authenticated tenant.
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL") || "";
-const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || "";
+const SUPABASE_ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY") || "";
 const OPENROUTER_API_KEY = Deno.env.get("OPENROUTER_API_KEY") || "";
+
+const SUPABASE_TOKEN_PATH = `${SCRIPT_DIR}supabase-token.json`;
+const SUPABASE_AUTH_PORT = 3848;
+const SUPABASE_REDIRECT_URI = `http://localhost:${SUPABASE_AUTH_PORT}/callback`;
 
 // Edge Function endpoint (--ingest-endpoint mode)
 const INGEST_URL = Deno.env.get("INGEST_URL") || "";
@@ -45,24 +55,43 @@ const INGEST_KEY = Deno.env.get("INGEST_KEY") || "";
 
 const OPENROUTER_BASE = "https://openrouter.ai/api/v1";
 
-// ─── Sync Log (deduplication) ────────────────────────────────────────────────
+// ─── Deduplication state (sourced from the database) ─────────────────────────
+//
+// The database is the single source of truth for what's already imported: every
+// ingested email is a thought row with metadata.source = "gmail" and a
+// metadata.gmail_id, persisted per-insert and RLS-scoped to this user. There is
+// no local sync log — we derive the "already ingested" set from those rows at
+// startup. This makes resumability automatic (a killed run loses nothing; the
+// next run re-derives from the DB) and works from any machine.
+//
+// A message counts as already-ingested for the current account when a row exists
+// with that gmail_id whose gmail_account matches — or is absent (legacy rows
+// imported before gmail_account was stamped; those are treated as a match so a
+// re-run skips them without re-embedding).
+async function fetchIngestedGmailIds(account: string): Promise<Set<string>> {
+  const seen = new Set<string>();
+  const accessToken = await getSupabaseAccessToken();
+  const pageSize = 1000;
 
-interface SyncLog {
-  ingested_ids: Record<string, string>; // gmail_message_id -> ISO timestamp
-  last_sync: string;
-}
-
-async function loadSyncLog(): Promise<SyncLog> {
-  try {
-    const text = await Deno.readTextFile(SYNC_LOG_PATH);
-    return JSON.parse(text);
-  } catch {
-    return { ingested_ids: {}, last_sync: "" };
+  for (let offset = 0; ; offset += pageSize) {
+    const url = `${SUPABASE_URL}/rest/v1/thoughts` +
+      `?select=gmail_id:metadata->>gmail_id,gmail_account:metadata->>gmail_account` +
+      `&metadata->>source=eq.gmail&order=id.asc&limit=${pageSize}&offset=${offset}`;
+    const res = await fetch(url, {
+      headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${accessToken}` },
+    });
+    if (!res.ok) {
+      throw new Error(`Failed to load already-ingested IDs: HTTP ${res.status}: ${await res.text()}`);
+    }
+    const rows = (await res.json()) as Array<{ gmail_id: string | null; gmail_account: string | null }>;
+    for (const r of rows) {
+      if (r.gmail_id && (r.gmail_account == null || r.gmail_account === account)) {
+        seen.add(r.gmail_id);
+      }
+    }
+    if (rows.length < pageSize) break;
   }
-}
-
-async function saveSyncLog(log: SyncLog): Promise<void> {
-  await Deno.writeTextFile(SYNC_LOG_PATH, JSON.stringify(log, null, 2));
+  return seen;
 }
 
 // ─── Content Fingerprint ────────────────────────────────────────────────────
@@ -84,6 +113,8 @@ interface CliArgs {
   limit: number;
   listLabels: boolean;
   ingestEndpoint: boolean;
+  excludeFrom: string[];
+  tokenFile: string;
 }
 
 function parseArgs(): CliArgs {
@@ -94,6 +125,8 @@ function parseArgs(): CliArgs {
     limit: 50,
     listLabels: false,
     ingestEndpoint: false,
+    excludeFrom: [],
+    tokenFile: "",
   };
 
   for (const arg of Deno.args) {
@@ -105,6 +138,11 @@ function parseArgs(): CliArgs {
       args.dryRun = true;
     } else if (arg.startsWith("--limit=")) {
       args.limit = parseInt(arg.split("=")[1], 10);
+    } else if (arg.startsWith("--exclude-from=")) {
+      args.excludeFrom = arg.split("=")[1].split(",")
+        .map((a) => a.trim()).filter((a) => a.length > 0);
+    } else if (arg.startsWith("--token-file=")) {
+      args.tokenFile = arg.split("=")[1].trim();
     } else if (arg === "--list-labels") {
       args.listLabels = true;
     } else if (arg === "--ingest-endpoint") {
@@ -190,15 +228,35 @@ async function refreshAccessToken(
   return updated;
 }
 
+// Live Gmail token state so every request can refresh on demand during long
+// imports — Gmail access tokens expire ~hourly. Populated by authorize().
+let gmailToken: TokenData | null = null;
+let gmailCreds: OAuthCredentials | null = null;
+
+// Returns a non-expired Gmail access token, refreshing transparently mid-import.
+async function getGmailAccessToken(): Promise<string> {
+  if (!gmailToken || !gmailCreds) {
+    throw new Error("Gmail not authorized (call authorize first).");
+  }
+  if (Date.now() >= gmailToken.expiry_date - 60_000) {
+    console.log("Gmail access token expired, refreshing...");
+    gmailToken = await refreshAccessToken(gmailCreds, gmailToken);
+  }
+  return gmailToken.access_token;
+}
+
 async function authorize(creds: OAuthCredentials): Promise<string> {
+  gmailCreds = creds;
   let token = await loadToken();
 
   if (token) {
     if (Date.now() < token.expiry_date - 60_000) {
+      gmailToken = token;
       return token.access_token;
     }
     console.log("Access token expired, refreshing...");
     token = await refreshAccessToken(creds, token);
+    gmailToken = token;
     return token.access_token;
   }
 
@@ -255,13 +313,164 @@ async function authorize(creds: OAuthCredentials): Promise<string> {
     expiry_date: Date.now() + tokenData.expires_in * 1000,
   };
   await saveToken(newToken);
+  gmailToken = newToken;
   console.log("\nAuthorization successful! Token saved.\n");
   return newToken.access_token;
 }
 
+// ─── Supabase OAuth (authenticate AS THE USER) ───────────────────────────────
+//
+// The import signs in as a Supabase user (GitHub, the same provider the connector
+// uses) via the OAuth 2.1 PKCE flow, then inserts with the anon key + the user's
+// access token. The insert runs as the `authenticated` role, so `user_id` is
+// stamped from `auth.uid()` and RLS enforces tenant scoping. See docs/auth.md.
+
+interface SupabaseToken {
+  access_token: string;
+  refresh_token: string;
+  expires_at: number; // unix seconds
+}
+
+let supabaseToken: SupabaseToken | null = null;
+
+function base64url(bytes: Uint8Array): string {
+  let bin = "";
+  for (const b of bytes) bin += String.fromCharCode(b);
+  return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+function generateCodeVerifier(): string {
+  const bytes = new Uint8Array(32);
+  crypto.getRandomValues(bytes);
+  return base64url(bytes);
+}
+
+async function codeChallenge(verifier: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier));
+  return base64url(new Uint8Array(digest));
+}
+
+async function loadSupabaseToken(): Promise<SupabaseToken | null> {
+  try {
+    return JSON.parse(await Deno.readTextFile(SUPABASE_TOKEN_PATH));
+  } catch {
+    return null;
+  }
+}
+
+async function saveSupabaseToken(token: SupabaseToken): Promise<void> {
+  await Deno.writeTextFile(SUPABASE_TOKEN_PATH, JSON.stringify(token, null, 2));
+}
+
+function tokenFromResponse(data: Record<string, unknown>): SupabaseToken {
+  return {
+    access_token: data.access_token as string,
+    refresh_token: data.refresh_token as string,
+    expires_at: (data.expires_at as number) ??
+      Math.floor(Date.now() / 1000) + ((data.expires_in as number) ?? 3600),
+  };
+}
+
+async function refreshSupabaseToken(refreshToken: string): Promise<SupabaseToken> {
+  const res = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=refresh_token`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", apikey: SUPABASE_ANON_KEY },
+    body: JSON.stringify({ refresh_token: refreshToken }),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(`Supabase token refresh failed: ${data.error_description || data.error || res.status}`);
+  }
+  const token = tokenFromResponse(data);
+  await saveSupabaseToken(token);
+  return token;
+}
+
+// Sign the user in (interactive on first run, cached + auto-refreshed after).
+// Populates the module-level supabaseToken.
+async function authorizeSupabase(): Promise<void> {
+  const cached = await loadSupabaseToken();
+  if (cached) {
+    const now = Math.floor(Date.now() / 1000);
+    if (cached.expires_at - 60 > now) {
+      supabaseToken = cached;
+      return;
+    }
+    try {
+      supabaseToken = await refreshSupabaseToken(cached.refresh_token);
+      console.log("Supabase session refreshed.\n");
+      return;
+    } catch (e) {
+      console.log(`Supabase refresh failed (${(e as Error).message}); re-authenticating.\n`);
+    }
+  }
+
+  // First-time / expired: interactive GitHub sign-in via PKCE.
+  const verifier = generateCodeVerifier();
+  const challenge = await codeChallenge(verifier);
+  const authUrl = new URL(`${SUPABASE_URL}/auth/v1/authorize`);
+  authUrl.searchParams.set("provider", "github");
+  authUrl.searchParams.set("redirect_to", SUPABASE_REDIRECT_URI);
+  authUrl.searchParams.set("code_challenge", challenge);
+  authUrl.searchParams.set("code_challenge_method", "s256");
+
+  console.log("\nSign in to Open Brain (GitHub) to authorize the import:\n");
+  console.log(authUrl.toString());
+  console.log("\nWaiting for sign-in...");
+
+  const code = await new Promise<string>((resolve, reject) => {
+    const server = Deno.serve({ port: SUPABASE_AUTH_PORT, onListen: () => {} }, (req) => {
+      const url = new URL(req.url);
+      const authCode = url.searchParams.get("code");
+      const err = url.searchParams.get("error_description") || url.searchParams.get("error");
+      if (authCode) {
+        resolve(authCode);
+        setTimeout(() => server.shutdown(), 100);
+        return new Response(
+          "<html><body><h2>Signed in!</h2><p>You can close this tab and return to your terminal.</p></body></html>",
+          { headers: { "Content-Type": "text/html" } },
+        );
+      }
+      if (err) {
+        reject(new Error(err));
+        setTimeout(() => server.shutdown(), 100);
+        return new Response(
+          `<html><body><h2>Sign-in failed</h2><p>${err}</p></body></html>`,
+          { status: 400, headers: { "Content-Type": "text/html" } },
+        );
+      }
+      return new Response("Waiting for sign-in...", { status: 400 });
+    });
+  });
+
+  const res = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=pkce`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", apikey: SUPABASE_ANON_KEY },
+    body: JSON.stringify({ auth_code: code, code_verifier: verifier }),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(`Supabase code exchange failed: ${data.error_description || data.error || res.status}`);
+  }
+  supabaseToken = tokenFromResponse(data);
+  await saveSupabaseToken(supabaseToken);
+  console.log("\nSupabase sign-in successful! Session saved.\n");
+}
+
+// Returns a non-expired access token, refreshing transparently mid-import.
+async function getSupabaseAccessToken(): Promise<string> {
+  if (!supabaseToken) throw new Error("Not signed in to Supabase (call authorizeSupabase first).");
+  const now = Math.floor(Date.now() / 1000);
+  if (supabaseToken.expires_at - 60 <= now) {
+    supabaseToken = await refreshSupabaseToken(supabaseToken.refresh_token);
+  }
+  return supabaseToken.access_token;
+}
+
 // ─── Gmail API Helpers ───────────────────────────────────────────────────────
 
-async function gmailFetch(accessToken: string, path: string): Promise<unknown> {
+async function gmailFetch(path: string): Promise<unknown> {
+  const accessToken = await getGmailAccessToken();
   const res = await fetch(`${GMAIL_API}${path}`, {
     headers: { Authorization: `Bearer ${accessToken}` },
   });
@@ -279,9 +488,16 @@ interface GmailLabel {
   messagesTotal?: number;
 }
 
-async function listLabels(accessToken: string): Promise<GmailLabel[]> {
-  const data = (await gmailFetch(accessToken, "/labels")) as { labels: GmailLabel[] };
+async function listLabels(): Promise<GmailLabel[]> {
+  const data = (await gmailFetch("/labels")) as { labels: GmailLabel[] };
   return data.labels;
+}
+
+// The email address of the authorized Gmail account (the token owner). Used to
+// scope dedup and stamp provenance, so multiple accounts stay distinct.
+async function getGmailAddress(): Promise<string> {
+  const data = (await gmailFetch("/profile")) as { emailAddress: string };
+  return data.emailAddress;
 }
 
 function windowToQuery(window: string): string {
@@ -323,7 +539,6 @@ interface GmailMessageRef {
 }
 
 async function listMessagesForLabel(
-  accessToken: string,
   label: string,
   query: string,
   limit: number,
@@ -337,7 +552,7 @@ async function listMessagesForLabel(
     if (query) path += `&q=${encodeURIComponent(query)}`;
     if (pageToken) path += `&pageToken=${pageToken}`;
 
-    const data = (await gmailFetch(accessToken, path)) as {
+    const data = (await gmailFetch(path)) as {
       messages?: GmailMessageRef[];
       nextPageToken?: string;
     };
@@ -352,7 +567,6 @@ async function listMessagesForLabel(
 }
 
 async function listMessages(
-  accessToken: string,
   labels: string[],
   query: string,
   limit: number,
@@ -361,7 +575,7 @@ async function listMessages(
   const allMessages: GmailMessageRef[] = [];
 
   for (const label of labels) {
-    const messages = await listMessagesForLabel(accessToken, label, query, limit);
+    const messages = await listMessagesForLabel(label, query, limit);
     for (const msg of messages) {
       if (!seen.has(msg.id)) {
         seen.add(msg.id);
@@ -393,8 +607,8 @@ interface GmailMessage {
   internalDate: string;
 }
 
-async function getMessage(accessToken: string, id: string): Promise<GmailMessage> {
-  return (await gmailFetch(accessToken, `/messages/${id}?format=full`)) as GmailMessage;
+async function getMessage(id: string): Promise<GmailMessage> {
+  return (await gmailFetch(`/messages/${id}?format=full`)) as GmailMessage;
 }
 
 function getHeader(msg: GmailMessage, name: string): string {
@@ -678,12 +892,17 @@ async function ingestThoughtDirect(
     row.content_fingerprint = fingerprint;
   }
 
+  // Insert as the authenticated user: anon key + the user's OAuth access token.
+  // RLS stamps user_id from auth.uid() and scopes the row to this tenant.
+  // user_id is intentionally NOT set here — the column default (auth.uid()) fills it.
+  const accessToken = await getSupabaseAccessToken();
+
   const res = await fetch(`${SUPABASE_URL}/rest/v1/thoughts`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      apikey: SUPABASE_SERVICE_ROLE_KEY,
-      Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+      apikey: SUPABASE_ANON_KEY,
+      Authorization: `Bearer ${accessToken}`,
       Prefer: "return=representation",
     },
     body: JSON.stringify(row),
@@ -712,8 +931,8 @@ async function ingestThoughtDirect(
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          apikey: SUPABASE_SERVICE_ROLE_KEY,
-          Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+          apikey: SUPABASE_ANON_KEY,
+          Authorization: `Bearer ${accessToken}`,
           Prefer: "return=representation",
         },
         body: JSON.stringify(row),
@@ -790,12 +1009,22 @@ function buildEmailContent(
 
 async function main() {
   const args = parseArgs();
+
+  // Per-account Gmail token: --token-file lets each Google account keep its own
+  // cached token (absolute path used as-is; a bare name resolves next to this script).
+  if (args.tokenFile) {
+    TOKEN_PATH = args.tokenFile.startsWith("/")
+      ? args.tokenFile
+      : `${SCRIPT_DIR}${args.tokenFile}`;
+    console.log(`Using Gmail token file: ${TOKEN_PATH}`);
+  }
+
   const creds = await loadCredentials();
-  const accessToken = await authorize(creds);
+  await authorize(creds); // populates the refreshable Gmail token state
 
   // --list-labels mode
   if (args.listLabels) {
-    const labels = await listLabels(accessToken);
+    const labels = await listLabels();
     console.log("\nGmail Labels:\n");
     const sorted = labels.sort((a, b) => a.name.localeCompare(b.name));
     for (const label of sorted) {
@@ -806,23 +1035,40 @@ async function main() {
   }
 
   // Build label ID -> name map for metadata
-  const allLabels = await listLabels(accessToken);
+  const allLabels = await listLabels();
   const labelMap = new Map<string, string>();
   for (const l of allLabels) {
     labelMap.set(l.id, l.name);
   }
+
+  // Which Gmail account this token belongs to — scopes dedup and stamps provenance.
+  const gmailAddress = await getGmailAddress();
 
   // Determine ingestion mode
   const useEndpoint = args.ingestEndpoint;
   const ingestMode = args.dryRun ? "DRY RUN" : useEndpoint ? "Edge Function endpoint" : "Supabase direct insert";
 
   // Normal pull mode
-  const query = windowToQuery(args.window);
+  const excludeTerms = args.excludeFrom.map((a) => `-from:${a}`);
+  const query = [windowToQuery(args.window), ...excludeTerms]
+    .filter((t) => t.length > 0).join(" ");
   console.log(`\nFetching emails...`);
   console.log(`  Labels: ${args.labels.join(", ")}`);
   console.log(`  Window: ${args.window}${query ? ` (${query})` : ""}`);
+  if (args.excludeFrom.length > 0) {
+    console.log(`  Exclude: ${args.excludeFrom.join(", ")}`);
+  }
   console.log(`  Limit:  ${args.limit}`);
   console.log(`  Mode:   ${ingestMode}`);
+
+  // Footgun guard: --window=all/1y only sets the time range; the default --limit
+  // (50) silently caps the fetch. Warn when a broad window is left at the default.
+  const limitExplicit = Deno.args.some((a) => a.startsWith("--limit="));
+  if (!limitExplicit && (args.window === "all" || args.window === "1y")) {
+    console.log(
+      `  ⚠️  --window=${args.window} with the default --limit=${args.limit}: only ${args.limit} messages will be fetched. Pass a higher --limit (e.g. --limit=100000) for a full import.`,
+    );
+  }
 
   if (!args.dryRun) {
     if (useEndpoint) {
@@ -832,8 +1078,8 @@ async function main() {
         Deno.exit(1);
       }
     } else {
-      if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
-        console.error("\nSUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are required for live mode.");
+      if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
+        console.error("\nSUPABASE_URL and SUPABASE_ANON_KEY are required for live mode.");
         console.error("Example: export SUPABASE_URL=https://YOUR_REF.supabase.co");
         Deno.exit(1);
       }
@@ -841,11 +1087,22 @@ async function main() {
         console.error("\nOPENROUTER_API_KEY is required for embedding + metadata extraction.");
         Deno.exit(1);
       }
+      // Sign in as the user once, up front, before the (possibly long) import loop.
+      await authorizeSupabase();
     }
   }
 
-  const syncLog = await loadSyncLog();
-  const messageRefs = await listMessages(accessToken, args.labels, query, args.limit);
+  // Already-imported set, derived from the database (the source of truth).
+  // Live direct mode only — that's where we hold a Supabase session and can read
+  // back. Endpoint mode leans on the server's fingerprint dedup; a dry run shows
+  // the raw Gmail selection without dedup (it never signs in to Supabase).
+  let seen = new Set<string>();
+  if (!args.dryRun && !useEndpoint) {
+    seen = await fetchIngestedGmailIds(gmailAddress);
+    console.log(`Already in Open Brain for ${gmailAddress}: ${seen.size}`);
+  }
+
+  const messageRefs = await listMessages(args.labels, query, args.limit);
   console.log(`\nFound ${messageRefs.length} messages.\n`);
 
   if (messageRefs.length === 0) return;
@@ -858,12 +1115,12 @@ async function main() {
   let totalWords = 0;
 
   for (const ref of messageRefs) {
-    if (syncLog.ingested_ids[ref.id]) {
+    if (seen.has(ref.id)) {
       alreadyIngested++;
       continue;
     }
 
-    const msg = await getMessage(accessToken, ref.id);
+    const msg = await getMessage(ref.id);
     const email = processEmail(msg);
 
     if (!email) {
@@ -898,6 +1155,7 @@ async function main() {
       gmail_labels: gmailLabels,
       gmail_id: email.gmailId,
       gmail_thread_id: email.threadId,
+      gmail_account: gmailAddress,
     };
 
     const content = buildEmailContent(email.body, email.from, email.subject, email.date);
@@ -907,7 +1165,7 @@ async function main() {
 
     if (result.ok) {
       ingested++;
-      syncLog.ingested_ids[ref.id] = new Date().toISOString();
+      seen.add(ref.id); // avoid re-processing if the same id appears under multiple labels
       const dupTag = result.duplicate ? " (duplicate — skipped)" : "";
       console.log(`   -> Ingested: ${result.type} — ${(result.topics || []).join(", ")}${dupTag}`);
     } else {
@@ -919,11 +1177,7 @@ async function main() {
     await new Promise((r) => setTimeout(r, 200));
   }
 
-  // Save sync log
-  if (!args.dryRun) {
-    syncLog.last_sync = new Date().toISOString();
-    await saveSyncLog(syncLog);
-  }
+  // No local state to persist — the database already recorded every insert.
 
   // Summary
   console.log("\u2500".repeat(60));

@@ -20,6 +20,8 @@ __pycache__/
 .env.*.local
 credentials.json
 token.json
+token-*.json
+supabase-token.json
 gmail-sync-log.json
 sync-log.json
 
